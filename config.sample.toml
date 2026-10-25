@@ -4,15 +4,29 @@
 #   Windows:        %USERPROFILE%\.config\quill\config.toml
 #
 # Or run `quill init` to generate it automatically.
+# Environment variables QUILL_API_URL, QUILL_API_KEY and QUILL_MODEL override the values below.
+# Keep config.toml private: it holds your API key. Never commit it.
 
 [api]
-url = "YOUR_API_URL_HERE"
+# Full Messages API endpoint. Must be https://
+# (plain http:// is accepted only for localhost, 127.x.x.x or ::1).
+url = "https://api.anthropic.com/v1/messages"
+# Required. Replace the placeholder with your API key (or set QUILL_API_KEY).
 key = "YOUR_API_KEY_HERE"
-model = "claude-3-7-sonnet@20250219"
+model = "claude-sonnet-4-5"
 anthropic_version = "2023-06-01"
-user_type = "USER"
-user_name = "YOUR_USER_ID"
-accept_invalid_certs = true
+# "x-api-key" (default) sends the key in the x-api-key header.
+# "bearer" sends it as Authorization: Bearer <key> instead.
+auth = "x-api-key"
+# Whole-request timeout in seconds (allowed range: 1 to 600).
+timeout_secs = 60
+# UNSAFE: disables TLS certificate checks. Only for local debugging.
+accept_invalid_certs = false
+
+# Optional extra request headers. Quill's own headers (Authorization, x-api-key,
+# anthropic-version, Content-Type, Host, Cookie, ...) cannot be set here.
+# [api.headers]
+# "X-Example" = "value"
 
 [transform]
 instruction = "Rephrase, humanize, shorten, and articulate the following text politely. Return ONLY the rewritten text — no labels, no options, no explanations."
@@ -27,5 +41,5 @@ prompt_override = ""
 [shortcut]
 # macOS: skhd syntax (requires skhd: `brew install koekeishiya/formulae/skhd`)
 macos = "cmd + shift - c"
-# Windows: modifier + key (used by native hotkey registration)
+# Windows: informational; the native hotkey is currently fixed to Ctrl+Shift+C
 windows = "ctrl + shift + c"

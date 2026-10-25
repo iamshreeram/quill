@@ -4,9 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
 
-use super::config;
+use super::{config, fsutil};
 
 #[derive(Serialize, Deserialize)]
 pub struct Entry {
@@ -16,6 +15,9 @@ pub struct Entry {
 }
 
 /// Append a before/after pair to history.jsonl.
+///
+/// Never writes through a symlink: the entry is skipped with a warning instead.
+/// The transform itself is not affected.
 pub fn append(before: &str, after: &str) {
     let path = config::history_path();
     let entry = Entry {
@@ -23,14 +25,15 @@ pub fn append(before: &str, after: &str) {
         before: before.to_string(),
         after: after.to_string(),
     };
-    if let Ok(json) = serde_json::to_string(&entry) {
-        if let Ok(mut f) = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
-            let _ = writeln!(f, "{json}");
-        }
+    let Ok(json) = serde_json::to_string(&entry) else {
+        return;
+    };
+    if fsutil::is_symlink(&path) {
+        eprintln!("[quill] warning: history.jsonl is a symlink; history not recorded");
+        return;
+    }
+    if let Err(e) = fsutil::append_private(&path, &json) {
+        eprintln!("[quill] warning: history not recorded: {e}");
     }
 }
 
@@ -46,10 +49,12 @@ pub fn load_all() -> Vec<Entry> {
         .collect()
 }
 
-/// Clear history file.
+/// Clear history file (atomically, mode 0600). Refuses symlinks with a warning.
 pub fn clear() {
     let path = config::history_path();
-    let _ = fs::write(&path, "");
+    if let Err(e) = fsutil::write_atomic_mode(&path, b"", 0o600) {
+        eprintln!("[quill] warning: history not cleared: {e}");
+    }
 }
 
 /// Count of entries in history.

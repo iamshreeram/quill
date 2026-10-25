@@ -1,14 +1,36 @@
-# Build artifacts
+# Rust build output
 /target/
 
 # macOS
 .DS_Store
 
-# IDE
+# IDEs and editors
 .idea/
 .vscode/
 *.swp
 *.swo
 
-# Binaries
-simcopy
+# Local Quill runtime state (never commit: may contain keys or personal text)
+config.toml
+history.jsonl
+context.md
+hotkey.sh
+quill.log
+*.log
+prompts/
+
+# Secrets and environment
+.env
+.env.*
+*.pem
+*.key
+
+# Local notes and tooling
+AGENTS.md
+CLAUDE.md
+.claude/
+.cursor/
+.windsurf/
+.worktrees/
+SESSION_HANDOFF.md
+TODO.md

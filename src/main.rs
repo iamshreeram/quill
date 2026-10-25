@@ -2,17 +2,21 @@
 //!
 //! Commands:
 //!   quill init          Create default config at ~/.config/quill/config.toml
+//!   quill check         Validate the config and send one test request
 //!   quill setup         Install keyboard shortcut
 //!   quill --now         Transform clipboard (one-shot)
+//!   quill --stdin       Transform stdin and print the result to stdout
 //!   quill --now -p X    Transform using prompt profile X
 //!   quill learn         Analyze history and update writing context
-//!   quill               Show usage
+//!   quill --help        Show usage
+//!   quill --version     Print the version
 
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod modules;
 
 use modules::{claude, clipboard, config, context, history};
+use std::io::{Read, Write};
 
 // ── One-shot transform ────────────────────────────────────────
 
@@ -67,30 +71,108 @@ fn transform_clipboard(prompt_name: Option<&str>) -> i32 {
     }
 }
 
+// ── Stdin: transform piped text, print to stdout ─────────────
+
+fn cmd_stdin(prompt_name: Option<&str>) -> i32 {
+    let cfg = match config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[quill] {e}");
+            return 1;
+        }
+    };
+
+    let instruction = match config::resolve_instruction(&cfg, prompt_name) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("[quill] {e}");
+            return 1;
+        }
+    };
+
+    let mut input = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut input) {
+        eprintln!("[quill] failed to read stdin as UTF-8 text: {e}");
+        return 1;
+    }
+    if input.trim().is_empty() {
+        eprintln!("[quill] no input: pipe text into `quill --stdin`");
+        return 1;
+    }
+
+    // Load writing style context
+    context::ensure_exists();
+    let user_context = context::load();
+
+    match claude::transform(&cfg, &instruction, &user_context, &input) {
+        Ok(result) => {
+            let mut out = std::io::stdout();
+            let written = writeln!(out, "{}", result.trim()).and_then(|()| out.flush());
+            if written.is_err() {
+                eprintln!("[quill] failed to write the result to stdout");
+                return 1;
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("[quill] error: {e}");
+            1
+        }
+    }
+}
+
+// ── Check: validate config and send one test request ─────────
+
+fn cmd_check() -> i32 {
+    let cfg = match config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[quill] {e}");
+            return 1;
+        }
+    };
+
+    match claude::check(&cfg) {
+        Ok(model) => {
+            println!("OK: {model} responded");
+            0
+        }
+        Err(e) => {
+            eprintln!("[quill] check failed: {e}");
+            1
+        }
+    }
+}
+
 // ── Init: create default config ───────────────────────────────
 
-fn cmd_init() {
+fn cmd_init() -> i32 {
     match config::write_default() {
         Ok(path) => {
             eprintln!("Config created at: {}", path.display());
             eprintln!("Prompts directory: {}", config::prompts_dir().display());
             eprintln!();
             eprintln!("Next steps:");
-            eprintln!("  1. Edit the config and set your API url, key, and user_name");
-            eprintln!("  2. Run `quill setup` to install the keyboard shortcut");
+            eprintln!("  1. Edit the config and set your API url and key (or use QUILL_API_URL/QUILL_API_KEY)");
+            eprintln!("  2. Run `quill check` to verify the connection");
+            eprintln!("  3. Run `quill setup` to install the keyboard shortcut");
+            0
         }
-        Err(e) => eprintln!("[quill] {e}"),
+        Err(e) => {
+            eprintln!("[quill] {e}");
+            1
+        }
     }
 }
 
 // ── Learn: analyze history and update context ────────────────
 
-fn cmd_learn() {
+fn cmd_learn() -> i32 {
     let cfg = match config::load() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("[quill] {e}");
-            return;
+            return 1;
         }
     };
 
@@ -98,7 +180,7 @@ fn cmd_learn() {
     if entries.is_empty() {
         eprintln!("[quill] no transformation history found.");
         eprintln!("Use quill a few times first, then run `quill learn`.");
-        return;
+        return 1;
     }
 
     eprintln!("[quill] analyzing {} transformations...", entries.len());
@@ -120,126 +202,60 @@ fn cmd_learn() {
     let existing_context = context::load();
 
     match claude::analyze_style(&cfg, &history_text, &existing_context) {
-        Ok(new_context) => {
-            match context::save(&new_context) {
-                Ok(()) => {
-                    eprintln!("[quill] context updated at: {}", config::context_path().display());
-                    eprintln!();
-                    eprintln!("{new_context}");
-                    // Clear processed history
-                    history::clear();
-                    eprintln!();
-                    eprintln!("History cleared. Future transforms will use these preferences.");
-                }
-                Err(e) => eprintln!("[quill] {e}"),
+        Ok(new_context) => match context::save(&new_context) {
+            Ok(()) => {
+                eprintln!("[quill] context updated at: {}", config::context_path().display());
+                eprintln!();
+                eprintln!("{new_context}");
+                // Clear processed history
+                history::clear();
+                eprintln!();
+                eprintln!("History cleared. Future transforms will use these preferences.");
+                0
             }
+            Err(e) => {
+                eprintln!("[quill] {e}");
+                1
+            }
+        },
+        Err(e) => {
+            eprintln!("[quill] failed to analyze: {e}");
+            1
         }
-        Err(e) => eprintln!("[quill] failed to analyze: {e}"),
     }
 }
 
 // ── Setup: install keyboard shortcut ──────────────────────────
 
-fn cmd_setup() {
+fn cmd_setup() -> i32 {
     let cfg = match config::load() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("[quill] {e}");
-            return;
+            return 1;
         }
     };
 
     #[cfg(target_os = "macos")]
-    setup_macos(&cfg);
+    {
+        if let Err(e) = modules::setup::setup_macos(&cfg) {
+            eprintln!("[quill] {e}");
+            return 1;
+        }
+    }
 
     #[cfg(target_os = "windows")]
     setup_windows(&cfg);
 
     #[cfg(target_os = "linux")]
     eprintln!("Linux: bind your DE shortcut to run `quill --now`");
-}
-
-#[cfg(target_os = "macos")]
-fn setup_macos(cfg: &config::Config) {
-    let binary = std::env::current_exe()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "quill".to_string());
-
-    let hotkey_script = format!(
-        "#!/bin/bash\n\
-         # Auto-generated by `quill setup`\n\
-         # Copies selected text via Edit>Copy menu, then transforms via Claude.\n\
-         osascript -e 'tell application \"System Events\"' \
-         -e 'try' \
-         -e 'click menu item \"Copy\" of menu \"Edit\" of menu bar 1 of \
-         (first application process whose frontmost is true)' \
-         -e 'end try' \
-         -e 'end tell'\n\
-         sleep 0.1\n\
-         \"{binary}\" --now 2>/tmp/quill.log\n"
-    );
-
-    let script_path = config::config_dir().join("hotkey.sh");
-    if let Err(e) = std::fs::write(&script_path, &hotkey_script) {
-        eprintln!("[quill] failed to write {}: {e}", script_path.display());
-        return;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755));
-    }
-
-    let skhd_line = format!(
-        "# Quill — auto-generated by `quill setup`\n\
-         {} : {}\n",
-        cfg.shortcut.macos,
-        script_path.display()
-    );
-
-    let skhd_path = dirs_home().join(".skhdrc");
-    let existing = std::fs::read_to_string(&skhd_path).unwrap_or_default();
-
-    let cleaned: String = existing
-        .lines()
-        .filter(|l| !l.contains("quill") && !l.contains("Quill")
-            && !l.contains("transformer") && !l.contains("Transformer"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let new_content = if cleaned.trim().is_empty() {
-        skhd_line
-    } else {
-        format!("{}\n{}", cleaned.trim(), skhd_line)
-    };
-
-    if let Err(e) = std::fs::write(&skhd_path, &new_content) {
-        eprintln!("[quill] failed to write {}: {e}", skhd_path.display());
-        return;
-    }
-
-    let _ = std::process::Command::new("skhd")
-        .arg("--restart-service")
-        .output();
-
-    eprintln!("Shortcut installed: {}", cfg.shortcut.macos);
-    eprintln!("skhd config: {}", skhd_path.display());
-    eprintln!("Hotkey script: {}", script_path.display());
-    eprintln!();
-    eprintln!("Make sure skhd has Accessibility access in:");
-    eprintln!("  System Settings > Privacy & Security > Accessibility");
+    0
 }
 
 #[cfg(target_os = "windows")]
 fn setup_windows(cfg: &config::Config) {
     eprintln!("Windows shortcut: {}", cfg.shortcut.windows);
     eprintln!("Run `quill` (no flags) to start the background hotkey daemon.");
-}
-
-fn dirs_home() -> std::path::PathBuf {
-    std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
 // ── Windows: native hotkey daemon ─────────────────────────────
@@ -277,51 +293,119 @@ fn windows_hotkey_loop() {
 
 // ── CLI argument parsing ────────────────────────────────────
 
-fn parse_prompt_flag(args: &[String]) -> Option<&str> {
-    for (i, arg) in args.iter().enumerate() {
-        if (arg == "--prompt" || arg == "-p") && i + 1 < args.len() {
-            return Some(&args[i + 1]);
+#[derive(Debug, PartialEq, Eq)]
+enum Command {
+    /// No arguments at all (Windows: also starts the hotkey daemon).
+    NoArgs,
+    Usage,
+    Version,
+    Init,
+    Check,
+    Setup,
+    Learn,
+    Now,
+    Stdin,
+}
+
+struct Cli {
+    command: Command,
+    prompt: Option<String>,
+}
+
+/// Parses the arguments. A value that follows -p/--prompt is consumed as the
+/// profile name and is never treated as a command.
+fn parse_args(args: &[String]) -> Result<Cli, String> {
+    let mut command: Option<Command> = None;
+    let mut prompt: Option<String> = None;
+    let mut iter = args.iter().skip(1);
+    while let Some(arg) = iter.next() {
+        let found = match arg.as_str() {
+            "-p" | "--prompt" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| format!("{arg} needs a profile name"))?;
+                prompt = Some(value.clone());
+                continue;
+            }
+            "init" => Command::Init,
+            "check" => Command::Check,
+            "setup" => Command::Setup,
+            "learn" => Command::Learn,
+            "--now" | "-n" => Command::Now,
+            "--stdin" => Command::Stdin,
+            "--help" | "-h" | "help" => Command::Usage,
+            "--version" | "-V" => Command::Version,
+            other => return Err(format!("unknown argument: {other}")),
+        };
+        if command.is_some() {
+            return Err("only one command can be given at a time".to_string());
         }
+        command = Some(found);
     }
-    None
+    Ok(Cli {
+        command: command.unwrap_or(Command::NoArgs),
+        prompt,
+    })
 }
 
 // ── Main ──────────────────────────────────────────────────
 
+fn print_usage() {
+    println!("Quill v{}", env!("CARGO_PKG_VERSION"));
+    println!();
+    println!("Commands:");
+    println!("  quill init             Create default config (uses QUILL_API_URL/QUILL_API_KEY if set)");
+    println!("  quill check            Validate the config and send one test request");
+    println!("  quill setup            Install keyboard shortcut");
+    println!("  quill --now            Transform clipboard");
+    println!("  quill --stdin          Transform stdin and print the result to stdout");
+    println!("  quill --now -p formal  Transform using prompt profile (also works with --stdin)");
+    println!("  quill learn            Update writing style from history");
+    println!("  quill --version        Print the version");
+    println!("  quill --help           Show this help");
+    println!();
+    println!("Config:   {}", config::config_path().display());
+    println!("Context:  {}", config::context_path().display());
+    println!("Prompts:  {}", config::prompts_dir().display());
+    println!("History:  {} ({} entries)", config::history_path().display(), history::count());
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let has = |flag: &str| args.iter().any(|a| a == flag);
+    let cli = match parse_args(&args) {
+        Ok(cli) => cli,
+        Err(e) => {
+            eprintln!("[quill] {e}");
+            eprintln!("Run `quill --help` for usage.");
+            std::process::exit(1);
+        }
+    };
 
-    if has("--now") || has("-n") {
-        let prompt = parse_prompt_flag(&args);
-        std::process::exit(transform_clipboard(prompt));
-    }
-
-    match args.get(1).map(|s| s.as_str()) {
-        Some("init") => cmd_init(),
-        Some("setup") => cmd_setup(),
-        Some("learn") => cmd_learn(),
-        _ => {
-            eprintln!("Quill v{}", env!("CARGO_PKG_VERSION"));
-            eprintln!();
-            eprintln!("Commands:");
-            eprintln!("  quill init             Create default config");
-            eprintln!("  quill setup            Install keyboard shortcut");
-            eprintln!("  quill --now            Transform clipboard");
-            eprintln!("  quill --now -p formal  Transform using prompt profile");
-            eprintln!("  quill learn            Update writing style from history");
-            eprintln!();
-            eprintln!("Config:   {}", config::config_path().display());
-            eprintln!("Context:  {}", config::context_path().display());
-            eprintln!("Prompts:  {}", config::prompts_dir().display());
-            eprintln!("History:  {} ({} entries)", config::history_path().display(), history::count());
-
+    let code = match cli.command {
+        Command::Now => transform_clipboard(cli.prompt.as_deref()),
+        Command::Stdin => cmd_stdin(cli.prompt.as_deref()),
+        Command::Check => cmd_check(),
+        Command::Init => cmd_init(),
+        Command::Setup => cmd_setup(),
+        Command::Learn => cmd_learn(),
+        Command::Usage => {
+            print_usage();
+            0
+        }
+        Command::Version => {
+            println!("quill {}", env!("CARGO_PKG_VERSION"));
+            0
+        }
+        Command::NoArgs => {
+            print_usage();
             #[cfg(target_os = "windows")]
             {
                 eprintln!();
                 eprintln!("Starting hotkey daemon...");
                 windows_hotkey_loop();
             }
+            0
         }
-    }
+    };
+    std::process::exit(code);
 }

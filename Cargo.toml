@@ -1,8 +1,15 @@
 [package]
 name = "quill"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
-description = "Lightweight system-wide text transformer powered by Claude"
+description = "Lightweight system-wide text transformer: rewrite your clipboard text via an LLM endpoint"
+license = "MIT"
+repository = "https://github.com/iamshreeram/quill"
+homepage = "https://github.com/iamshreeram/quill"
+readme = "README.md"
+authors = ["iamshreeram"]
+keywords = ["clipboard", "llm", "cli", "text", "productivity"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 ureq = { version = "2", features = ["json", "native-tls"], default-features = false }

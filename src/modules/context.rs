@@ -5,7 +5,7 @@
 
 use std::fs;
 
-use super::config;
+use super::{config, fsutil};
 
 const DEFAULT_CONTEXT: &str = "\
 # Quill Writing Context
@@ -27,17 +27,18 @@ pub fn load() -> String {
     fs::read_to_string(&path).unwrap_or_default()
 }
 
-/// Write context.md contents.
+/// Write context.md contents (atomically, mode 0600).
+/// Returns Err, and leaves the target untouched, when context.md is a symlink.
 pub fn save(content: &str) -> Result<(), String> {
     let path = config::context_path();
-    fs::write(&path, content)
-        .map_err(|e| format!("Failed to write {}: {e}", path.display()))
+    fsutil::write_atomic_mode(&path, content.as_bytes(), 0o600)
 }
 
-/// Create default context.md if it doesn't exist.
+/// Create default context.md if no entry exists at that path (a symlink counts
+/// as an entry, so nothing is ever written through it).
 pub fn ensure_exists() {
     let path = config::context_path();
-    if !path.exists() {
-        let _ = fs::write(&path, DEFAULT_CONTEXT);
+    if fs::symlink_metadata(&path).is_err() {
+        let _ = fsutil::write_atomic_mode(&path, DEFAULT_CONTEXT.as_bytes(), 0o600);
     }
 }
