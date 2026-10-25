@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-26
+
 ### Added
 - Offline grammar mode powered by `harper-core`, for checking and correcting text without any network access.
 - Automatic provider selection: the configured API is used first, then a local Ollama server, then offline mode.
