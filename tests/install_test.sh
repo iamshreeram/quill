@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2016,SC2329  # fake tool bodies are intentionally single-quoted; cleanup runs via trap
+# shellcheck disable=SC2016,SC2317,SC2329  # fake tool bodies are intentionally single-quoted; cleanup runs via trap
 # Acceptance tests for install.sh (spec: .ram-status/quill-modes-20251025-2255/DESIGN.md Rev 4, Part B).
 # Hermetic: fake release server on 127.0.0.1 (python3), fake release archives containing a shell-script
 # "quill", sealed PATH (symlinked POSIX tools + test fakes), per-test HOME. Never touches the real HOME,

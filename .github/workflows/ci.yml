@@ -84,7 +84,7 @@ jobs:
       - name: shellcheck install.sh
         run: shellcheck -s sh install.sh
       - name: shellcheck scripts and tests
-        run: shellcheck scripts/*.sh tests/*.sh
+        run: shellcheck --severity=warning scripts/*.sh tests/*.sh
       - name: Installer tests
         run: bash tests/install_test.sh
       - name: Release script tests

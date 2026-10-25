@@ -485,6 +485,7 @@ fn cmd_learn(cli_mode: Option<Mode>) -> i32 {
 // ── Setup: install keyboard shortcut ──────────────────────────
 
 fn cmd_setup() -> i32 {
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
     let cfg = match config::load(None) {
         Ok(c) => c,
         Err(e) => {

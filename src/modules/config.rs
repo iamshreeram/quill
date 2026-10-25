@@ -58,6 +58,7 @@ pub struct Config {
     /// The configured API. `None` when no real key is present (auto/offline mode only).
     pub api: Option<ApiConfig>,
     pub transform: TransformConfig,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub shortcut: ShortcutConfig,
     pub mode: Mode,
     pub mode_source: ModeSource,
@@ -166,6 +167,7 @@ pub struct TransformConfig {
 #[derive(Clone)]
 pub struct ShortcutConfig {
     /// skhd syntax for macOS, e.g. "cmd + shift - c"
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub macos: String,
     /// Windows hotkey, e.g. "ctrl + shift + c" (informational; only read on Windows)
     #[cfg_attr(not(windows), allow(dead_code))]

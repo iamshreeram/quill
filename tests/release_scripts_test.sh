@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2015  # "A && B || fail" is intentional in assertions
 # Acceptance tests for scripts/check-version.sh, scripts/package.sh, scripts/release.sh
 # (spec: .ram-status/quill-modes-20251025-2255/DESIGN.md Rev 4, Part C).
 # Hermetic: every test works on a throwaway fixture repo selected via QUILL_REPO_ROOT; nothing here

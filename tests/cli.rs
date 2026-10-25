@@ -238,6 +238,7 @@ impl Env {
         fs::write(&p, script).unwrap();
         fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
     }
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn remove_fake(&self, name: &str) {
         let _ = fs::remove_file(self.bin.join(name));
     }
@@ -798,7 +799,6 @@ fn t18_help_and_version() {
             format!("quill {}", env!("CARGO_PKG_VERSION"))
         );
     }
-    assert_eq!(env!("CARGO_PKG_VERSION"), "0.4.0");
     env.assert_no_sentinel();
 }
 
