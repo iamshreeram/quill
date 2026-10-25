@@ -1,0 +1,31 @@
+# Quill configuration
+# Copy this file to the appropriate location for your platform:
+#   macOS / Linux:  ~/.config/quill/config.toml
+#   Windows:        %USERPROFILE%\.config\quill\config.toml
+#
+# Or run `quill init` to generate it automatically.
+
+[api]
+url = "YOUR_API_URL_HERE"
+key = "YOUR_API_KEY_HERE"
+model = "claude-3-7-sonnet@20250219"
+anthropic_version = "2023-06-01"
+user_type = "USER"
+user_name = "YOUR_USER_ID"
+accept_invalid_certs = true
+
+[transform]
+instruction = "Rephrase, humanize, shorten, and articulate the following text politely. Return ONLY the rewritten text — no labels, no options, no explanations."
+system_prompt = "You are a text transformation assistant. Return ONLY the transformed text. Do NOT add quotes, explanations, labels, prefixes, or any extra formatting. Do NOT introduce yourself or ask questions. Just output the raw transformed text, nothing else."
+max_tokens = 4096
+
+# Set to a prompt file name (without .txt) to override the instruction above.
+# Prompt files live in ~/.config/quill/prompts/<name>.txt
+# Can also be overridden via: --prompt <name> flag or QUILL_PROMPT=<name> env var.
+prompt_override = ""
+
+[shortcut]
+# macOS: skhd syntax (requires skhd: `brew install koekeishiya/formulae/skhd`)
+macos = "cmd + shift - c"
+# Windows: modifier + key (used by native hotkey registration)
+windows = "ctrl + shift + c"
