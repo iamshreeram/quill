@@ -1,17 +1,24 @@
-//! Claude Messages API client. Every request goes through `post_message`, which
+//! Claude Messages API client. Every request goes through `post_raw`, which
 //! applies the configured auth style, extra headers, timeout and redirect policy.
 //!
 //! Error strings are generated locally: they never contain the key, header values,
 //! URLs, or raw response bodies.
 
-use super::config::{AuthStyle, Config};
+use super::config::{ApiConfig, AuthStyle, Config};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 
 const CHECK_PROMPT: &str = "Reply with the single word OK";
 const CHECK_SYSTEM: &str = "You are a connectivity check. Follow the user's instruction exactly.";
-const CHECK_MAX_TOKENS: u32 = 16;
+
+/// Token budget for `quill check` against the configured Anthropic API (kept small on purpose).
+pub const API_CHECK_MAX_TOKENS: u32 = 16;
+
+/// Token budget for `quill check` against a local Ollama model. Thinking-capable local models
+/// (e.g. qwen3) emit a `thinking` block before any `text` block, and a 16-token budget ends
+/// inside the thinking block, so the reply has no text ("response contained no text").
+pub const LOCAL_CHECK_MAX_TOKENS: u32 = 1024;
 
 #[derive(Serialize)]
 struct Request {
@@ -73,29 +80,38 @@ fn build_system_prompt(cfg: &Config, user_context: &str) -> String {
     )
 }
 
-/// Call the configured Claude model and return the transformed text.
+/// The configured API, or a local error when none is configured.
+fn require_api(cfg: &Config) -> Result<&ApiConfig, String> {
+    cfg.api
+        .as_ref()
+        .ok_or_else(|| "API not configured".to_string())
+}
+
+/// Call the configured model and return the transformed text.
 pub fn transform(
     cfg: &Config,
     instruction: &str,
     user_context: &str,
     text: &str,
 ) -> Result<String, String> {
+    let api = require_api(cfg)?;
     let user_msg = format!("Instruction: {instruction}\n\nText to transform:\n{text}");
     let body = user_request(
-        &cfg.api.model,
+        &api.model,
         build_system_prompt(cfg, user_context),
         user_msg,
         cfg.transform.max_tokens,
     );
-    post_message(cfg, &body)
+    parse_text(&post_raw(api, &body)?)
 }
 
-/// Ask Claude to analyze transformation history and produce a writing style summary.
+/// Ask the model to analyze transformation history and produce a writing style summary.
 pub fn analyze_style(
     cfg: &Config,
     history_text: &str,
     existing_context: &str,
 ) -> Result<String, String> {
+    let api = require_api(cfg)?;
     let system = "\
         You are a writing style analyst. You will receive a list of before/after \
         text transformation pairs. Analyze the patterns to understand what the user \
@@ -116,35 +132,34 @@ pub fn analyze_style(
         )
     };
 
-    let body = user_request(&cfg.api.model, system, user_msg, cfg.transform.max_tokens);
-    post_message(cfg, &body)
+    let body = user_request(&api.model, system, user_msg, cfg.transform.max_tokens);
+    parse_text(&post_raw(api, &body)?)
 }
 
 /// Send one minimal request to verify the configuration. Returns the model name on success.
-pub fn check(cfg: &Config) -> Result<String, String> {
+pub fn check(cfg: &Config, max_tokens: u32) -> Result<String, String> {
+    let api = require_api(cfg)?;
     let body = user_request(
-        &cfg.api.model,
+        &api.model,
         CHECK_SYSTEM.to_string(),
         CHECK_PROMPT.to_string(),
-        CHECK_MAX_TOKENS,
+        max_tokens,
     );
-    post_message(cfg, &body)?;
-    Ok(cfg.api.model.clone())
+    parse_envelope(&post_raw(api, &body)?)?;
+    Ok(api.model.clone())
 }
 
-/// Shared request function for transform, analyze_style and check.
-fn post_message(cfg: &Config, body: &Request) -> Result<String, String> {
-    let agent = build_agent(cfg)?;
+/// Shared request function: returns the raw successful response body.
+fn post_raw(api: &ApiConfig, body: &Request) -> Result<String, String> {
+    let agent = build_agent(api)?;
 
-    let mut req = agent
-        .post(&cfg.api.url)
-        .set("Content-Type", "application/json");
-    req = match cfg.api.auth {
-        AuthStyle::XApiKey => req.set("x-api-key", &cfg.api.key),
-        AuthStyle::Bearer => req.set("Authorization", &format!("Bearer {}", cfg.api.key)),
+    let mut req = agent.post(&api.url).set("Content-Type", "application/json");
+    req = match api.auth {
+        AuthStyle::XApiKey => req.set("x-api-key", &api.key),
+        AuthStyle::Bearer => req.set("Authorization", &format!("Bearer {}", api.key)),
     };
-    req = req.set("anthropic-version", &cfg.api.anthropic_version);
-    for (name, value) in &cfg.api.headers {
+    req = req.set("anthropic-version", &api.anthropic_version);
+    for (name, value) in &api.headers {
         req = req.set(name, value);
     }
 
@@ -159,19 +174,18 @@ fn post_message(cfg: &Config, body: &Request) -> Result<String, String> {
     if code >= 300 {
         return Err(status_error(code));
     }
-    let text = response.into_string().map_err(|e| body_error(&e))?;
-    parse_text(&text)
+    response.into_string().map_err(|e| body_error(&e))
 }
 
-fn build_agent(cfg: &Config) -> Result<ureq::Agent, String> {
+fn build_agent(api: &ApiConfig) -> Result<ureq::Agent, String> {
     let tls = native_tls::TlsConnector::builder()
-        .danger_accept_invalid_certs(cfg.api.accept_invalid_certs)
+        .danger_accept_invalid_certs(api.accept_invalid_certs)
         .build()
         .map_err(|_| "request failed: tls error".to_string())?;
     Ok(ureq::AgentBuilder::new()
         .tls_connector(Arc::new(tls))
         .redirects(0)
-        .timeout(Duration::from_secs(cfg.api.timeout_secs))
+        .timeout(Duration::from_secs(api.timeout_secs))
         .build())
 }
 
@@ -224,6 +238,19 @@ fn body_error(err: &std::io::Error) -> String {
     }
 }
 
+/// Check-only validation: any well-formed Messages reply proves that the endpoint, key and model
+/// answer. A thinking-capable model may spend the whole check budget on a `thinking` block and
+/// emit no `text` block; that is still a working connection, so it is not an error here.
+fn parse_envelope(body: &str) -> Result<(), String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| "unexpected response format".to_string())?;
+    match parsed.get("content").and_then(|c| c.as_array()) {
+        Some(blocks) if !blocks.is_empty() => Ok(()),
+        Some(_) => Err("response contained no content".to_string()),
+        None => Err("unexpected response format".to_string()),
+    }
+}
+
 fn parse_text(body: &str) -> Result<String, String> {
     let parsed: Response =
         serde_json::from_str(body).map_err(|_| "unexpected response format".to_string())?;
@@ -232,4 +259,44 @@ fn parse_text(body: &str) -> Result<String, String> {
         .into_iter()
         .find_map(|b| b.text)
         .ok_or_else(|| "response contained no text".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thinking_only_body_has_no_text() {
+        // Shape captured from qwen3:30b via Ollama when the check budget (16 tokens) runs out
+        // inside the thinking block: no text block at all, stop_reason "max_tokens".
+        let body = r#"{"id":"msg_1","type":"message","role":"assistant","model":"qwen3:30b",
+            "content":[{"type":"thinking","thinking":"Okay, the user wants me to reply with just"}],
+            "stop_reason":"max_tokens"}"#;
+        assert_eq!(parse_text(body).unwrap_err(), "response contained no text");
+    }
+
+    #[test]
+    fn check_accepts_a_thinking_only_reply() {
+        let body = r#"{"content":[{"type":"thinking","thinking":"Okay, the user"}],
+            "stop_reason":"max_tokens"}"#;
+        assert!(parse_envelope(body).is_ok());
+        assert_eq!(
+            parse_envelope(r#"{"content":[]}"#).unwrap_err(),
+            "response contained no content"
+        );
+        assert!(parse_envelope("not json").is_err());
+    }
+
+    #[test]
+    fn thinking_then_text_yields_the_text() {
+        let body = r#"{"content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"OK"}],
+            "stop_reason":"end_turn"}"#;
+        assert_eq!(parse_text(body).unwrap(), "OK");
+    }
+
+    #[test]
+    fn check_budgets_are_pinned() {
+        assert_eq!(LOCAL_CHECK_MAX_TOKENS, 1024);
+        assert_eq!(API_CHECK_MAX_TOKENS, 16);
+    }
 }

@@ -272,6 +272,8 @@ impl Env {
             .env("HOME", &self.home)
             .env("USERPROFILE", &self.home)
             .env("PATH", &self.bin)
+            // t01-t16 specify the AI-only behaviour; auto mode (default) is covered by tests/offline_modes.rs.
+            .env("QUILL_MODE", "ai")
             .stdin(Stdio::piped())
             .stdout(fs::File::create(&out_p).unwrap())
             .stderr(fs::File::create(&err_p).unwrap());

@@ -3,5 +3,8 @@ pub mod clipboard;
 pub mod config;
 pub mod context;
 pub mod fsutil;
+pub mod grammar;
 pub mod history;
+pub mod ollama;
+pub mod provider;
 pub mod setup;

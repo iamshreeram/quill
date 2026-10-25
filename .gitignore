@@ -34,3 +34,6 @@ CLAUDE.md
 .worktrees/
 SESSION_HANDOFF.md
 TODO.md
+
+# ram orchestration state
+.ram-status/

@@ -2,7 +2,11 @@
 //!
 //! Config file: ~/.config/quill/config.toml (see config.sample.toml).
 //! Environment overrides (win over the file; an empty value counts as unset):
-//! QUILL_API_URL, QUILL_API_KEY, QUILL_MODEL.
+//! QUILL_API_URL, QUILL_API_KEY, QUILL_MODEL, QUILL_MODE, QUILL_OLLAMA_URL, QUILL_OLLAMA_MODEL.
+//!
+//! Mode (`auto` | `ai` | `offline`) precedence: CLI > QUILL_MODE > `[general] mode` > `auto`.
+//! In `ai` mode the API must be fully configured; in `auto` and `offline` mode a missing file or
+//! missing/placeholder key is not an error (see DESIGN.md A2).
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -11,6 +15,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
 use super::fsutil;
+use super::grammar::Dialect;
 
 const CONFIG_DIR: &str = "quill";
 const CONFIG_FILE: &str = "config.toml";
@@ -18,8 +23,8 @@ const LOG_FILE: &str = "quill.log";
 
 const DEFAULT_URL: &str = "https://api.anthropic.com/v1/messages";
 const DEFAULT_MODEL: &str = "claude-sonnet-4-5";
-const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
-const DEFAULT_TIMEOUT_SECS: i64 = 60;
+pub const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
+pub const DEFAULT_TIMEOUT_SECS: i64 = 60;
 const MIN_TIMEOUT_SECS: i64 = 1;
 const MAX_TIMEOUT_SECS: i64 = 600;
 const PLACEHOLDER_KEY: &str = "YOUR_API_KEY_HERE";
@@ -28,6 +33,7 @@ const DEFAULT_INSTRUCTION: &str = "Rephrase, humanize, shorten, and articulate t
 const DEFAULT_SYSTEM_PROMPT: &str = "You are a text transformation assistant. Return ONLY the transformed text. Do NOT add quotes, explanations, labels, prefixes, or any extra formatting. Do NOT introduce yourself or ask questions. Just output the raw transformed text, nothing else.";
 const DEFAULT_MACOS_SHORTCUT: &str = "cmd + shift - c";
 const DEFAULT_WINDOWS_SHORTCUT: &str = "ctrl + shift + c";
+pub const DEFAULT_OLLAMA_URL: &str = "http://127.0.0.1:11434";
 
 /// Headers that Quill sets itself; they can never be configured in [api.headers].
 const RESERVED_HEADERS: &[&str] = &[
@@ -49,17 +55,78 @@ const RESERVED_HEADERS: &[&str] = &[
 /// Validated runtime configuration.
 #[derive(Clone)]
 pub struct Config {
-    pub api: ApiConfig,
+    /// The configured API. `None` when no real key is present (auto/offline mode only).
+    pub api: Option<ApiConfig>,
     pub transform: TransformConfig,
     pub shortcut: ShortcutConfig,
+    pub mode: Mode,
+    pub mode_source: ModeSource,
+    pub ollama: OllamaConfig,
+    pub offline: OfflineConfig,
 }
 
+/// Which backend family a command may use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AuthStyle {
-    /// `x-api-key: <key>` header (Anthropic default).
-    XApiKey,
-    /// `Authorization: Bearer <key>` header.
-    Bearer,
+pub enum Mode {
+    /// Configured API, else a usable local Ollama model, else the offline grammar engine.
+    Auto,
+    /// Configured API only; failures are errors (no fallback, no Ollama probing).
+    Ai,
+    /// Offline grammar engine only; never touches the network.
+    Offline,
+}
+
+impl Mode {
+    pub fn parse(value: &str) -> Option<Mode> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Mode::Auto),
+            "ai" => Some(Mode::Ai),
+            "offline" => Some(Mode::Offline),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Auto => "auto",
+            Mode::Ai => "ai",
+            Mode::Offline => "offline",
+        }
+    }
+}
+
+/// Where the effective mode came from (shown by `quill status`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModeSource {
+    Default,
+    Env,
+    Config,
+    Cli,
+}
+
+impl ModeSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ModeSource::Default => "default",
+            ModeSource::Env => "env",
+            ModeSource::Config => "config",
+            ModeSource::Cli => "cli",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct OllamaConfig {
+    pub enabled: bool,
+    /// Base URL without a trailing slash, e.g. http://127.0.0.1:11434
+    pub url: String,
+    /// Configured model name; empty means auto-pick.
+    pub model: String,
+}
+
+#[derive(Clone)]
+pub struct OfflineConfig {
+    pub dialect: Dialect,
 }
 
 #[derive(Clone)]
@@ -77,6 +144,14 @@ pub struct ApiConfig {
     pub accept_invalid_certs: bool,
     /// Extra request headers, validated.
     pub headers: Vec<(String, String)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthStyle {
+    /// `x-api-key: <key>` header (Anthropic default).
+    XApiKey,
+    /// `Authorization: Bearer <key>` header.
+    Bearer,
 }
 
 #[derive(Clone)]
@@ -102,9 +177,32 @@ pub struct ShortcutConfig {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct RawConfig {
+    general: RawGeneral,
     api: RawApi,
+    ollama: RawOllama,
+    offline: RawOffline,
     transform: RawTransform,
     shortcut: RawShortcut,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawGeneral {
+    mode: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawOllama {
+    enabled: Option<bool>,
+    url: Option<String>,
+    model: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawOffline {
+    dialect: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -179,6 +277,11 @@ fn env_nonempty(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
+/// True when QUILL_API_KEY is set to a non-empty value (the value is never returned).
+pub fn env_api_key_set() -> bool {
+    env_nonempty("QUILL_API_KEY").is_some()
+}
+
 /// Repairs permissions of Quill's local files when the config dir exists.
 /// Symlinks are never chmod'ed or followed for writes; reads may follow them.
 fn repair_local_files() {
@@ -192,24 +295,55 @@ fn repair_local_files() {
     }
 }
 
-/// Load and validate the configuration. No network I/O happens here.
-pub fn load() -> Result<Config, String> {
+/// Load and validate the configuration. Repairs local file modes first; no network I/O.
+pub fn load(cli_mode: Option<Mode>) -> Result<Config, String> {
     repair_local_files();
+    inspect(cli_mode)
+}
+
+/// Load and validate the configuration without touching any file (used by `status`).
+pub fn inspect(cli_mode: Option<Mode>) -> Result<Config, String> {
     let path = config_path();
-    let raw = match fs::read_to_string(&path) {
-        Ok(text) => parse_file(&path, &text)?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if env_nonempty("QUILL_API_KEY").is_none() {
-                return Err(format!(
-                    "Config not found at {}. Run `quill init`, or set QUILL_API_KEY (and QUILL_API_URL).",
-                    path.display()
-                ));
-            }
-            RawConfig::default()
-        }
+    let (raw, found) = match fs::read_to_string(&path) {
+        Ok(text) => (parse_file(&path, &text)?, true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (RawConfig::default(), false),
         Err(e) => return Err(format!("Failed to read {}: {e}", path.display())),
     };
-    build(raw)
+    let file_mode = match raw.general.mode.as_deref() {
+        Some(value) => Some(Mode::parse(value).ok_or_else(|| {
+            format!(
+                "Invalid config at {}: general.mode must be auto, ai or offline",
+                path.display()
+            )
+        })?),
+        None => None,
+    };
+    let env_mode = env_nonempty("QUILL_MODE");
+    let (mode, mode_source) = resolve_mode(cli_mode, env_mode.as_deref(), file_mode)?;
+    build(raw, found, mode, mode_source, &path)
+}
+
+/// Mode precedence: CLI > QUILL_MODE > config file > `auto`. Invalid env values are errors.
+pub fn resolve_mode(
+    cli: Option<Mode>,
+    env: Option<&str>,
+    file: Option<Mode>,
+) -> Result<(Mode, ModeSource), String> {
+    let env_mode = match env {
+        Some(value) => Some(Mode::parse(value).ok_or_else(|| {
+            "invalid mode in QUILL_MODE: expected auto, ai or offline".to_string()
+        })?),
+        None => None,
+    };
+    Ok(if let Some(m) = cli {
+        (m, ModeSource::Cli)
+    } else if let Some(m) = env_mode {
+        (m, ModeSource::Env)
+    } else if let Some(m) = file {
+        (m, ModeSource::Config)
+    } else {
+        (Mode::Auto, ModeSource::Default)
+    })
 }
 
 /// Parse the file. Only a sanitized TOML error message and the line number are
@@ -245,8 +379,63 @@ fn safe_toml_message(message: &str) -> String {
     }
 }
 
-fn build(raw: RawConfig) -> Result<Config, String> {
-    let api = build_api(raw.api)?;
+/// True when the key is absent or the placeholder (not a configuration error outside ai mode).
+fn key_is_unset(key: &str) -> bool {
+    let trimmed = key.trim();
+    trimmed.is_empty() || trimmed == PLACEHOLDER_KEY
+}
+
+fn build(
+    raw: RawConfig,
+    found: bool,
+    mode: Mode,
+    mode_source: ModeSource,
+    path: &Path,
+) -> Result<Config, String> {
+    let strict = mode == Mode::Ai;
+    let key_env = env_nonempty("QUILL_API_KEY");
+    if strict && !found && key_env.is_none() {
+        return Err(format!(
+            "Config not found at {}. Run `quill init`, or set QUILL_API_KEY (and QUILL_API_URL).",
+            path.display()
+        ));
+    }
+    let key_present = !key_is_unset(
+        key_env
+            .as_deref()
+            .or(raw.api.key.as_deref())
+            .unwrap_or_default(),
+    );
+    let api = if strict || key_present {
+        Some(build_api(raw.api)?)
+    } else {
+        None
+    };
+
+    let ollama_url = env_nonempty("QUILL_OLLAMA_URL")
+        .or(raw.ollama.url)
+        .unwrap_or_else(|| DEFAULT_OLLAMA_URL.to_string());
+    validate_url(&ollama_url, "ollama.url", "QUILL_OLLAMA_URL")?;
+    let ollama = OllamaConfig {
+        enabled: raw.ollama.enabled.unwrap_or(true),
+        url: ollama_url.trim_end_matches('/').to_string(),
+        model: env_nonempty("QUILL_OLLAMA_MODEL")
+            .or(raw.ollama.model)
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+    };
+
+    let dialect = match raw.offline.dialect.as_deref() {
+        None => Dialect::American,
+        Some(value) => value.parse::<Dialect>().map_err(|_| {
+            format!(
+                "Invalid config at {}: offline.dialect must be american, british, australian, canadian or indian",
+                path.display()
+            )
+        })?,
+    };
+
     let transform = TransformConfig {
         instruction: raw
             .transform
@@ -273,6 +462,10 @@ fn build(raw: RawConfig) -> Result<Config, String> {
         api,
         transform,
         shortcut,
+        mode,
+        mode_source,
+        ollama,
+        offline: OfflineConfig { dialect },
     })
 }
 
@@ -280,7 +473,7 @@ fn build_api(raw: RawApi) -> Result<ApiConfig, String> {
     let url = env_nonempty("QUILL_API_URL")
         .or(raw.url)
         .unwrap_or_else(|| DEFAULT_URL.to_string());
-    validate_url(&url)?;
+    validate_url(&url, "api.url", "QUILL_API_URL")?;
 
     let key_raw = env_nonempty("QUILL_API_KEY")
         .or(raw.key)
@@ -311,13 +504,13 @@ fn build_api(raw: RawApi) -> Result<ApiConfig, String> {
 
 /// Returns the trimmed key, or an error. The key is never echoed.
 fn validate_key(key: &str) -> Result<String, String> {
-    let trimmed = key.trim();
-    if trimmed.is_empty() || trimmed == PLACEHOLDER_KEY {
+    if key_is_unset(key) {
         return Err(
             "api.key is not set. Put your API key in config.toml under [api], or set QUILL_API_KEY."
                 .to_string(),
         );
     }
+    let trimmed = key.trim();
     if trimmed.chars().any(|c| c.is_control()) {
         return Err(
             "api.key contains control characters; check config.toml or QUILL_API_KEY.".to_string(),
@@ -326,35 +519,36 @@ fn validate_key(key: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
-/// Validates the endpoint without echoing any part of it.
-/// Allowed: https://, or http:// only for loopback hosts.
-fn validate_url(url: &str) -> Result<(), String> {
-    const HINT: &str =
-        "api.url must be a full URL such as https://host/v1/messages (or set QUILL_API_URL)";
+/// Validates an endpoint without echoing any part of it.
+/// Allowed: https://, or http:// only for loopback hosts. `field` names the setting in messages.
+fn validate_url(url: &str, field: &str, env_name: &str) -> Result<(), String> {
     if url.is_empty() || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
-        return Err(format!("Invalid api.url: {HINT}"));
+        return Err(format!(
+            "Invalid {field}: a full URL is required, e.g. https://host/v1/messages (or set {env_name})"
+        ));
     }
-    let (scheme, rest) = url
-        .split_once("://")
-        .ok_or_else(|| format!("Invalid api.url: {HINT}"))?;
+    let (scheme, rest) = url.split_once("://").ok_or_else(|| {
+        format!(
+            "Invalid {field}: a full URL is required, e.g. https://host/v1/messages (or set {env_name})"
+        )
+    })?;
     let scheme = scheme.to_ascii_lowercase();
     if scheme != "https" && scheme != "http" {
-        return Err("Invalid api.url: the scheme must be https".to_string());
+        return Err(format!("Invalid {field}: the scheme must be https"));
     }
 
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..end];
     if authority.contains('@') {
-        return Err(
-            "api.url must not contain credentials (user:pass@); set the key in api.key or QUILL_API_KEY"
-                .to_string(),
-        );
+        return Err(format!(
+            "{field} must not contain credentials (user:pass@); set the key in api.key or QUILL_API_KEY"
+        ));
     }
 
     let (host, port, bracketed) = if let Some(inner) = authority.strip_prefix('[') {
         let close = inner
             .find(']')
-            .ok_or_else(|| "api.url has an invalid IPv6 host".to_string())?;
+            .ok_or_else(|| format!("{field} has an invalid IPv6 host"))?;
         let after = &inner[close + 1..];
         let port = if after.is_empty() {
             None
@@ -362,7 +556,7 @@ fn validate_url(url: &str) -> Result<(), String> {
             Some(
                 after
                     .strip_prefix(':')
-                    .ok_or_else(|| "api.url has an invalid IPv6 host".to_string())?,
+                    .ok_or_else(|| format!("{field} has an invalid IPv6 host"))?,
             )
         };
         (&inner[..close], port, true)
@@ -375,14 +569,14 @@ fn validate_url(url: &str) -> Result<(), String> {
 
     if let Some(p) = port {
         if p.parse::<u16>().is_err() {
-            return Err("api.url has an invalid port".to_string());
+            return Err(format!("{field} has an invalid port"));
         }
     }
     if host.is_empty() {
-        return Err("api.url has no host".to_string());
+        return Err(format!("{field} has no host"));
     }
     if bracketed && host.parse::<Ipv6Addr>().is_err() {
-        return Err("api.url has an invalid IPv6 host".to_string());
+        return Err(format!("{field} has an invalid IPv6 host"));
     }
 
     let loopback = host.eq_ignore_ascii_case("localhost")
@@ -395,10 +589,9 @@ fn validate_url(url: &str) -> Result<(), String> {
             .map(|a| a.is_loopback())
             .unwrap_or(false);
     if scheme == "http" && !loopback {
-        return Err(
-            "api.url must use https://; plain http is allowed only for localhost, 127.x.x.x or ::1"
-                .to_string(),
-        );
+        return Err(format!(
+            "{field} must use https://; plain http is allowed only for localhost, 127.x.x.x or ::1"
+        ));
     }
     Ok(())
 }
@@ -532,15 +725,21 @@ fn toml_escape(value: &str) -> String {
 }
 
 /// Renders the sample config, replacing the `url = ...` and `key = ...` lines
-/// of [api] with the given (escaped) values when provided.
+/// of the `[api]` section only (other sections keep their own url values).
 pub fn render_default_toml(url: Option<&str>, key: Option<&str>) -> String {
     let mut out = String::new();
+    let mut section = String::new();
     for line in default_toml().lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            section = trimmed.to_string();
+        }
+        let in_api = section == "[api]";
         match (url, key) {
-            (Some(u), _) if line.starts_with("url = ") => {
+            (Some(u), _) if in_api && line.starts_with("url = ") => {
                 out.push_str(&format!("url = \"{}\"", toml_escape(u)));
             }
-            (_, Some(k)) if line.starts_with("key = ") => {
+            (_, Some(k)) if in_api && line.starts_with("key = ") => {
                 out.push_str(&format!("key = \"{}\"", toml_escape(k)));
             }
             _ => out.push_str(line),
@@ -587,4 +786,68 @@ pub fn write_default() -> Result<PathBuf, String> {
     }
 
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mode_parse_is_case_insensitive_and_strict() {
+        assert_eq!(Mode::parse("Offline"), Some(Mode::Offline));
+        assert_eq!(Mode::parse(" ai "), Some(Mode::Ai));
+        assert_eq!(Mode::parse("auto"), Some(Mode::Auto));
+        assert_eq!(Mode::parse("bogus"), None);
+        assert_eq!(Mode::parse(""), None);
+    }
+
+    #[test]
+    fn mode_precedence_is_cli_env_config_default() {
+        let (m, s) = resolve_mode(Some(Mode::Ai), Some("offline"), Some(Mode::Auto)).unwrap();
+        assert_eq!((m, s), (Mode::Ai, ModeSource::Cli));
+        let (m, s) = resolve_mode(None, Some("offline"), Some(Mode::Ai)).unwrap();
+        assert_eq!((m, s), (Mode::Offline, ModeSource::Env));
+        let (m, s) = resolve_mode(None, None, Some(Mode::Ai)).unwrap();
+        assert_eq!((m, s), (Mode::Ai, ModeSource::Config));
+        let (m, s) = resolve_mode(None, None, None).unwrap();
+        assert_eq!((m, s), (Mode::Auto, ModeSource::Default));
+    }
+
+    #[test]
+    fn invalid_env_mode_is_an_error_that_mentions_mode() {
+        let err = resolve_mode(None, Some("bogus"), None).unwrap_err();
+        assert!(err.contains("mode"), "{err}");
+    }
+
+    #[test]
+    fn ollama_url_uses_the_same_rules_as_api_url() {
+        assert!(validate_url("http://127.0.0.1:11434", "ollama.url", "QUILL_OLLAMA_URL").is_ok());
+        let err = validate_url("http://example.com", "ollama.url", "QUILL_OLLAMA_URL").unwrap_err();
+        assert!(err.contains("ollama.url") && err.contains("https"), "{err}");
+        let err =
+            validate_url("http://u:p@127.0.0.1:1", "ollama.url", "QUILL_OLLAMA_URL").unwrap_err();
+        assert!(!err.contains("u:p"), "{err}");
+    }
+
+    #[test]
+    fn init_replacement_only_touches_the_api_section() {
+        let text = render_default_toml(Some("https://llm.example.test/v1/messages"), Some("k-1"));
+        let v: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(
+            v["api"]["url"].as_str(),
+            Some("https://llm.example.test/v1/messages")
+        );
+        assert_eq!(v["api"]["key"].as_str(), Some("k-1"));
+        assert_eq!(v["ollama"]["url"].as_str(), Some(DEFAULT_OLLAMA_URL));
+        assert_eq!(v["general"]["mode"].as_str(), Some("auto"));
+        assert_eq!(v["offline"]["dialect"].as_str(), Some("american"));
+    }
+
+    #[test]
+    fn sample_config_parses_with_expected_defaults() {
+        let raw: RawConfig = toml::from_str(default_toml()).unwrap();
+        assert_eq!(raw.general.mode.as_deref(), Some("auto"));
+        assert_eq!(raw.ollama.enabled, Some(true));
+        assert_eq!(raw.offline.dialect.as_deref(), Some("american"));
+    }
 }

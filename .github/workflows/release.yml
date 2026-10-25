@@ -1,0 +1,202 @@
+# Release pipeline: triggered by any tag shaped like v<major>.<minor>.<patch>, including
+# prereleases such as v1.0.0-rc.1 (which become GitHub prereleases).
+#
+# Experimental-Windows policy: the four supported targets (x86_64/aarch64 Linux-gnu,
+# x86_64/aarch64 Apple-darwin) are required. The Windows target is marked experimental
+# because it cannot be verified locally: its build or smoke failure does not fail the
+# build job, and publish then ships the four supported archives. The Windows archive is
+# included only when its artifact exists; otherwise publish prints a warning annotation.
+#
+# Linux builds run on the ubuntu-22.04 runners to fix the glibc 2.35 / OpenSSL 3 baseline
+# that install.sh enforces; do not move them to newer runner images.
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify tag
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tag matches Cargo.toml and CHANGELOG.md
+        run: bash scripts/check-version.sh "$GITHUB_REF_NAME"
+      - name: Install Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test
+        run: cargo test --locked
+
+  build:
+    name: build ${{ matrix.target }}
+    needs: verify
+    # Experimental targets may fail without failing the job (see policy above).
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      # Keep the supported targets running even if the experimental Windows build fails.
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            experimental: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+            experimental: false
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            experimental: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            experimental: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            experimental: true
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Smoke test binary (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          BIN: target/${{ matrix.target }}/release/quill
+          EXPECTED_VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          test "$("$BIN" --version)" = "quill ${EXPECTED_VERSION#v}"
+          echo 'this is an test' | "$BIN" --stdin --mode offline > out.txt
+          grep -q 'a test' out.txt
+      - name: Smoke test binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          EXPECTED_VERSION: ${{ github.ref_name }}
+        run: |
+          $bin = "target\${{ matrix.target }}\release\quill.exe"
+          $version = & $bin --version
+          if ($version -ne "quill $($env:EXPECTED_VERSION.Substring(1))") { throw "unexpected version: $version" }
+          # The GUI-subsystem binary only writes stdout when redirected to a file.
+          "this is an test" | & $bin --stdin --mode offline > out.txt
+          $out = Get-Content out.txt -Raw
+          if ($out -notmatch "a test") { throw "offline smoke test output lacks 'a test'" }
+      - name: Package
+        shell: bash
+        env:
+          VERSION: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            bin="target/$TARGET/release/quill.exe"
+          else
+            bin="target/$TARGET/release/quill"
+          fi
+          bash scripts/package.sh "$TARGET" "${VERSION#v}" "$bin" dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: publish GitHub release
+    needs: [verify, build]
+    # Run whenever verify passed and the build job was not cancelled; build may report
+    # failure only through experimental targets, so the artifact check below decides.
+    if: ${{ !cancelled() && needs.verify.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: artifacts
+      - name: Check supported-target artifacts and detect Windows
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          supported=(x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin)
+          missing=()
+          for target in "${supported[@]}"; do
+            for file in "quill-$version-$target.tar.gz" SHA256SUMS; do
+              [ -f "artifacts/release-$target/$file" ] || missing+=("release-$target/$file")
+            done
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "error: required artifacts for supported targets are missing:" >&2
+            printf '  %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
+          # Every supported target is present; list the targets to publish.
+          : > "$RUNNER_TEMP/published-targets.txt"
+          printf '%s\n' "${supported[@]}" >> "$RUNNER_TEMP/published-targets.txt"
+          windows="x86_64-pc-windows-msvc"
+          if [ -f "artifacts/release-$windows/quill-$version-$windows.zip" ] \
+            && [ -f "artifacts/release-$windows/SHA256SUMS" ]; then
+            echo "$windows" >> "$RUNNER_TEMP/published-targets.txt"
+          else
+            echo "::warning::Experimental Windows build was skipped or failed; this release has no Windows archive."
+          fi
+          cat "$RUNNER_TEMP/published-targets.txt"
+      - name: Merge checksums and verify archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          mkdir -p dist
+          : > dist/fragments.txt
+          : > "$RUNNER_TEMP/expected-archives.txt"
+          while read -r target; do
+            case "$target" in
+              *windows*) archive="quill-$version-$target.zip" ;;
+              *) archive="quill-$version-$target.tar.gz" ;;
+            esac
+            cp "artifacts/release-$target/$archive" dist/
+            echo "$archive" >> "$RUNNER_TEMP/expected-archives.txt"
+            cat "artifacts/release-$target/SHA256SUMS" >> dist/fragments.txt
+          done < "$RUNNER_TEMP/published-targets.txt"
+          # Merge the per-target fragments into one sorted, de-duplicated file.
+          LC_ALL=C sort -u -k2,2 dist/fragments.txt > dist/SHA256SUMS
+          rm -f dist/fragments.txt
+          cat dist/SHA256SUMS
+          # The checksum file must cover exactly the archives being published.
+          diff <(sort "$RUNNER_TEMP/expected-archives.txt") <(awk '{ print $2 }' dist/SHA256SUMS | sort)
+          (cd dist && sha256sum -c SHA256SUMS)
+      - name: Build release notes
+        run: bash scripts/changelog-section.sh "${VERSION#v}" > notes.md
+      - name: Create GitHub release
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "error: GitHub release $VERSION already exists; delete it manually before re-running" >&2
+            exit 1
+          fi
+          flags=()
+          if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
+          mapfile -t archives < <(awk '{ print $2 }' dist/SHA256SUMS)
+          assets=()
+          for archive in "${archives[@]}"; do assets+=("dist/$archive"); done
+          gh release create "$VERSION" --verify-tag --title "quill $VERSION" \
+            --notes-file notes.md "${flags[@]}" \
+            "${assets[@]}" dist/SHA256SUMS install.sh install.ps1

@@ -1,5 +1,6 @@
-# CI builds and tests on Ubuntu and macOS.
-# Windows is not covered by CI; its clipboard and hotkey code is experimental.
+# CI: lint, build + test on Ubuntu/macOS/Windows, and shell-script checks.
+# Windows is experimental: its clipboard and hotkey code cannot be verified locally,
+# so only its smoke step is allowed to fail without failing the job.
 name: CI
 
 on:
@@ -7,9 +8,62 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  build:
-    name: build (${{ matrix.os }})
+  lint:
+    name: lint (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - name: Build
+        run: cargo build --locked
+      - name: Test
+        run: cargo test --locked
+      # Experimental: the Windows binary is GUI-subsystem, so its stdout only appears
+      # when redirected to a file. Cannot be verified locally; failures do not fail CI.
+      - name: Windows smoke test (experimental)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          & .\target\debug\quill.exe --version
+          "this is an test" | & .\target\debug\quill.exe --stdin --mode offline > smoke.txt
+          $out = Get-Content smoke.txt -Raw
+          Write-Host $out
+          if ($out -notmatch "a test") { throw "offline smoke test output lacks 'a test'" }
+
+  scripts:
+    name: scripts (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -17,8 +71,21 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build
-        run: cargo build --locked
-      - name: Test
-        run: cargo test --locked
+      - name: Install shellcheck if missing
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            if [ "$RUNNER_OS" = "Linux" ]; then
+              sudo apt-get update && sudo apt-get install -y shellcheck
+            else
+              brew install shellcheck
+            fi
+          fi
+          shellcheck --version
+      - name: shellcheck install.sh
+        run: shellcheck -s sh install.sh
+      - name: shellcheck scripts and tests
+        run: shellcheck scripts/*.sh tests/*.sh
+      - name: Installer tests
+        run: bash tests/install_test.sh
+      - name: Release script tests
+        run: bash tests/release_scripts_test.sh

@@ -262,6 +262,18 @@ pub fn setup_macos(cfg: &config::Config) -> Result<(), String> {
     Ok(())
 }
 
+/// Reports (skhd on PATH, quill managed block present in ~/.skhdrc) for `quill status`.
+/// Read-only: never creates or edits ~/.skhdrc.
+#[cfg(target_os = "macos")]
+pub fn hotkey_status() -> (bool, bool) {
+    let installed = find_on_path("skhd").is_some();
+    let block = skhdrc_target(&home_dir())
+        .and_then(|target| read_skhdrc(&target))
+        .map(|(text, _)| text.contains(BEGIN_MARKER))
+        .unwrap_or(false);
+    (installed, block)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
