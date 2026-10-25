@@ -168,8 +168,9 @@ fn read_skhdrc(target: &Path) -> Result<(String, u32), String> {
     use std::os::unix::fs::PermissionsExt;
     match fs::metadata(target) {
         Ok(meta) => {
-            let text = fs::read_to_string(target)
-                .map_err(|_| "could not read ~/.skhdrc as UTF-8 text; leaving it unchanged".to_string())?;
+            let text = fs::read_to_string(target).map_err(|_| {
+                "could not read ~/.skhdrc as UTF-8 text; leaving it unchanged".to_string()
+            })?;
             Ok((text, meta.permissions().mode() & 0o777))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((String::new(), 0o644)),
@@ -197,15 +198,21 @@ fn find_on_path(program: &str) -> Option<PathBuf> {
 pub fn setup_macos(cfg: &config::Config) -> Result<(), String> {
     let shortcut = cfg.shortcut.macos.trim();
     if shortcut.is_empty() || shortcut.chars().any(|c| c.is_control()) {
-        return Err("[shortcut] macos must be a single non-empty line, e.g. \"cmd + shift - c\"".to_string());
+        return Err(
+            "[shortcut] macos must be a single non-empty line, e.g. \"cmd + shift - c\""
+                .to_string(),
+        );
     }
 
     let config_dir = config::config_dir();
     fsutil::ensure_private_dir(&config_dir)?;
 
-let log_path = config::log_path();
+    let log_path = config::log_path();
     if fsutil::is_symlink(&log_path) {
-        return Err("refusing to log through a symlink: quill.log (remove it and re-run `quill setup`)".to_string());
+        return Err(
+            "refusing to log through a symlink: quill.log (remove it and re-run `quill setup`)"
+                .to_string(),
+        );
     }
     if fs::symlink_metadata(&log_path).is_err() {
         fsutil::write_atomic_mode(&log_path, b"", 0o600)?;
@@ -222,7 +229,10 @@ let log_path = config::log_path();
     let rc_path = home.join(".skhdrc");
     let rc_target = skhdrc_target(&home)?;
     let (existing, mode) = read_skhdrc(&rc_target)?;
-    let body = format!("{shortcut} : {}", shell_quote(&hotkey_path.display().to_string()));
+    let body = format!(
+        "{shortcut} : {}",
+        shell_quote(&hotkey_path.display().to_string())
+    );
     let updated = apply_managed_block(&existing, &body)?;
     fsutil::write_atomic_mode(&rc_target, updated.as_bytes(), mode)?;
 

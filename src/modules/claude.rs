@@ -136,7 +136,9 @@ pub fn check(cfg: &Config) -> Result<String, String> {
 fn post_message(cfg: &Config, body: &Request) -> Result<String, String> {
     let agent = build_agent(cfg)?;
 
-    let mut req = agent.post(&cfg.api.url).set("Content-Type", "application/json");
+    let mut req = agent
+        .post(&cfg.api.url)
+        .set("Content-Type", "application/json");
     req = match cfg.api.auth {
         AuthStyle::XApiKey => req.set("x-api-key", &cfg.api.key),
         AuthStyle::Bearer => req.set("Authorization", &format!("Bearer {}", cfg.api.key)),

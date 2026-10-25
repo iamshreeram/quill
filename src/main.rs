@@ -204,7 +204,10 @@ fn cmd_learn() -> i32 {
     match claude::analyze_style(&cfg, &history_text, &existing_context) {
         Ok(new_context) => match context::save(&new_context) {
             Ok(()) => {
-                eprintln!("[quill] context updated at: {}", config::context_path().display());
+                eprintln!(
+                    "[quill] context updated at: {}",
+                    config::context_path().display()
+                );
                 eprintln!();
                 eprintln!("{new_context}");
                 // Clear processed history
@@ -354,7 +357,9 @@ fn print_usage() {
     println!("Quill v{}", env!("CARGO_PKG_VERSION"));
     println!();
     println!("Commands:");
-    println!("  quill init             Create default config (uses QUILL_API_URL/QUILL_API_KEY if set)");
+    println!(
+        "  quill init             Create default config (uses QUILL_API_URL/QUILL_API_KEY if set)"
+    );
     println!("  quill check            Validate the config and send one test request");
     println!("  quill setup            Install keyboard shortcut");
     println!("  quill --now            Transform clipboard");
@@ -367,7 +372,11 @@ fn print_usage() {
     println!("Config:   {}", config::config_path().display());
     println!("Context:  {}", config::context_path().display());
     println!("Prompts:  {}", config::prompts_dir().display());
-    println!("History:  {} ({} entries)", config::history_path().display(), history::count());
+    println!(
+        "History:  {} ({} entries)",
+        config::history_path().display(),
+        history::count()
+    );
 }
 
 fn main() {

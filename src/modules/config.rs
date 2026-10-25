@@ -92,7 +92,8 @@ pub struct TransformConfig {
 pub struct ShortcutConfig {
     /// skhd syntax for macOS, e.g. "cmd + shift - c"
     pub macos: String,
-    /// Windows hotkey, e.g. "ctrl + shift + c"
+    /// Windows hotkey, e.g. "ctrl + shift + c" (informational; only read on Windows)
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub windows: String,
 }
 
@@ -211,32 +212,68 @@ pub fn load() -> Result<Config, String> {
     build(raw)
 }
 
-/// Parse the file. Only the TOML error message and line number are reported,
-/// never the source snippet (which may contain the key).
+/// Parse the file. Only a sanitized TOML error message and the line number are
+/// reported, never the source snippet (which may contain the key).
 fn parse_file(path: &Path, text: &str) -> Result<RawConfig, String> {
-    toml::from_str::<RawConfig>(text).map_err(|e| match e.span() {
-        Some(span) => {
-            let upto = span.start.min(text.len());
-            let line = text.as_bytes()[..upto].iter().filter(|b| **b == b'\n').count() + 1;
-            format!("Invalid config at {} (line {line}): {}", path.display(), e.message())
+    toml::from_str::<RawConfig>(text).map_err(|e| {
+        let message = safe_toml_message(e.message());
+        match e.span() {
+            Some(span) => {
+                let upto = span.start.min(text.len());
+                let line = text.as_bytes()[..upto]
+                    .iter()
+                    .filter(|b| **b == b'\n')
+                    .count()
+                    + 1;
+                format!(
+                    "Invalid config at {} (line {line}): {message}",
+                    path.display()
+                )
+            }
+            None => format!("Invalid config at {}: {message}", path.display()),
         }
-        None => format!("Invalid config at {}: {}", path.display(), e.message()),
     })
+}
+
+/// Serde type/value errors quote the offending value (`invalid type: string "..."`),
+/// which could be a secret placed in the wrong field. Syntax errors never quote values.
+fn safe_toml_message(message: &str) -> String {
+    if message.contains('"') {
+        "a value has the wrong type or is not valid for its field".to_string()
+    } else {
+        message.to_string()
+    }
 }
 
 fn build(raw: RawConfig) -> Result<Config, String> {
     let api = build_api(raw.api)?;
     let transform = TransformConfig {
-        instruction: raw.transform.instruction.unwrap_or_else(|| DEFAULT_INSTRUCTION.to_string()),
-        system_prompt: raw.transform.system_prompt.unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string()),
+        instruction: raw
+            .transform
+            .instruction
+            .unwrap_or_else(|| DEFAULT_INSTRUCTION.to_string()),
+        system_prompt: raw
+            .transform
+            .system_prompt
+            .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string()),
         max_tokens: raw.transform.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
         prompt_override: raw.transform.prompt_override.unwrap_or_default(),
     };
     let shortcut = ShortcutConfig {
-        macos: raw.shortcut.macos.unwrap_or_else(|| DEFAULT_MACOS_SHORTCUT.to_string()),
-        windows: raw.shortcut.windows.unwrap_or_else(|| DEFAULT_WINDOWS_SHORTCUT.to_string()),
+        macos: raw
+            .shortcut
+            .macos
+            .unwrap_or_else(|| DEFAULT_MACOS_SHORTCUT.to_string()),
+        windows: raw
+            .shortcut
+            .windows
+            .unwrap_or_else(|| DEFAULT_WINDOWS_SHORTCUT.to_string()),
     };
-    Ok(Config { api, transform, shortcut })
+    Ok(Config {
+        api,
+        transform,
+        shortcut,
+    })
 }
 
 fn build_api(raw: RawApi) -> Result<ApiConfig, String> {
@@ -245,7 +282,9 @@ fn build_api(raw: RawApi) -> Result<ApiConfig, String> {
         .unwrap_or_else(|| DEFAULT_URL.to_string());
     validate_url(&url)?;
 
-    let key_raw = env_nonempty("QUILL_API_KEY").or(raw.key).unwrap_or_default();
+    let key_raw = env_nonempty("QUILL_API_KEY")
+        .or(raw.key)
+        .unwrap_or_default();
     let key = validate_key(&key_raw)?;
 
     let model = env_nonempty("QUILL_MODEL")
@@ -280,7 +319,9 @@ fn validate_key(key: &str) -> Result<String, String> {
         );
     }
     if trimmed.chars().any(|c| c.is_control()) {
-        return Err("api.key contains control characters; check config.toml or QUILL_API_KEY.".to_string());
+        return Err(
+            "api.key contains control characters; check config.toml or QUILL_API_KEY.".to_string(),
+        );
     }
     Ok(trimmed.to_string())
 }
@@ -288,7 +329,8 @@ fn validate_key(key: &str) -> Result<String, String> {
 /// Validates the endpoint without echoing any part of it.
 /// Allowed: https://, or http:// only for loopback hosts.
 fn validate_url(url: &str) -> Result<(), String> {
-    const HINT: &str = "api.url must be a full URL such as https://host/v1/messages (or set QUILL_API_URL)";
+    const HINT: &str =
+        "api.url must be a full URL such as https://host/v1/messages (or set QUILL_API_URL)";
     if url.is_empty() || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return Err(format!("Invalid api.url: {HINT}"));
     }
@@ -344,8 +386,14 @@ fn validate_url(url: &str) -> Result<(), String> {
     }
 
     let loopback = host.eq_ignore_ascii_case("localhost")
-        || host.parse::<Ipv4Addr>().map(|a| a.is_loopback()).unwrap_or(false)
-        || host.parse::<Ipv6Addr>().map(|a| a.is_loopback()).unwrap_or(false);
+        || host
+            .parse::<Ipv4Addr>()
+            .map(|a| a.is_loopback())
+            .unwrap_or(false)
+        || host
+            .parse::<Ipv6Addr>()
+            .map(|a| a.is_loopback())
+            .unwrap_or(false);
     if scheme == "http" && !loopback {
         return Err(
             "api.url must use https://; plain http is allowed only for localhost, 127.x.x.x or ::1"
@@ -359,7 +407,9 @@ fn parse_auth(value: Option<&str>) -> Result<AuthStyle, String> {
     match value {
         None | Some("x-api-key") => Ok(AuthStyle::XApiKey),
         Some("bearer") => Ok(AuthStyle::Bearer),
-        Some(_) => Err("Invalid auth setting: use \"x-api-key\" (default) or \"bearer\"".to_string()),
+        Some(_) => {
+            Err("Invalid auth setting: use \"x-api-key\" (default) or \"bearer\"".to_string())
+        }
     }
 }
 
@@ -384,17 +434,23 @@ fn validate_headers(map: BTreeMap<String, String>) -> Result<Vec<(String, String
     let mut out: Vec<(String, String)> = Vec::new();
     for (name, value) in map {
         if !is_token(&name) {
-            return Err("invalid header name in [api.headers]: use only token characters".to_string());
+            return Err(
+                "invalid header name in [api.headers]: use only token characters".to_string(),
+            );
         }
         let lower = name.to_ascii_lowercase();
         if RESERVED_HEADERS.contains(&lower.as_str()) {
-            return Err("reserved header in [api.headers]: Quill sets this header itself".to_string());
+            return Err(
+                "reserved header in [api.headers]: Quill sets this header itself".to_string(),
+            );
         }
         if out.iter().any(|(k, _)| k.eq_ignore_ascii_case(&name)) {
             return Err("duplicate header in [api.headers]".to_string());
         }
         if value.chars().any(|c| c.is_control() && c != '\t') {
-            return Err("invalid header value in [api.headers]: must not contain CR, LF or NUL".to_string());
+            return Err(
+                "invalid header value in [api.headers]: must not contain CR, LF or NUL".to_string(),
+            );
         }
         out.push((name, value));
     }
@@ -405,7 +461,10 @@ fn validate_headers(map: BTreeMap<String, String>) -> Result<Vec<(String, String
 
 /// Profile names: `^[A-Za-z0-9_-]+$`.
 fn is_valid_profile_name(name: &str) -> bool {
-    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// Resolve the effective instruction.
@@ -529,4 +588,3 @@ pub fn write_default() -> Result<PathBuf, String> {
 
     Ok(path)
 }
-

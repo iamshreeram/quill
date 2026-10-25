@@ -18,7 +18,7 @@ Quill can also read from standard input (`echo 'text' | quill --stdin`), which n
 | Windows | EXPERIMENTAL: not built or tested by the author, no CI coverage | PowerShell `Get-Clipboard` / `Set-Clipboard` | Fixed to Ctrl+Shift+C; the `[shortcut] windows` setting is informational only |
 | Linux | EXPERIMENTAL: builds in CI; the clipboard code is untested on real desktops | `wl-paste`/`wl-copy` on Wayland, `xclip` on X11 (`xsel` as fallback) | Bind your desktop shortcut to `quill --now` |
 
-On Linux you need `wl-clipboard` (Wayland) or `xclip` (X11) installed. On Windows, running `quill` with no arguments starts the hotkey listener.
+On Linux you need `wl-clipboard` (Wayland) or `xclip` (X11) installed at run time, and `pkg-config` plus the OpenSSL development headers (for example `libssl-dev` on Debian/Ubuntu) to build. On Windows, running `quill` with no arguments starts the hotkey listener; the Windows build is a GUI-subsystem program, so `--help`, `--stdin` and error output may not appear in an interactive console.
 
 Continuous integration (see `.github/workflows/ci.yml`) builds and tests on Ubuntu and macOS. Windows is not covered by CI.
 
@@ -106,7 +106,7 @@ The config directory also holds `context.md`, `history.jsonl`, `quill.log`, `hot
 
 ### Example config
 
-This shows every field with its default. The only field without a usable default is `key`, which must be set to a real key.
+This shows every field with its default value. The long default texts of `instruction` and `system_prompt` are shortened here; the full text is in [`config.sample.toml`](config.sample.toml). The only field without a usable default is `key`, which must be set to a real key.
 
 ```toml
 [api]
@@ -219,7 +219,7 @@ Failures are logged to `~/.config/quill/quill.log`.
 - TLS certificates are verified by default. `accept_invalid_certs = true` disables verification and is unsafe; use it only for local debugging.
 - Plain `http` is allowed only for loopback hosts.
 - Redirects are not followed. A 3xx response is an error and no redirected request is sent.
-- Errors from the request path (HTTP status, timeouts, TLS, malformed responses) are generated locally and never include your key, the URL, request headers or response bodies. Config parse errors report only the line number and the parser's message, never the source line.
+- Errors from the request path (HTTP status, timeouts, TLS, malformed responses) are generated locally and never include your key, the URL, request headers or response bodies. Config parse errors report only the line number and a sanitized parser message: the source line is never shown, and messages that would quote a value (for example a type mismatch) are replaced by a generic text.
 
 ## Troubleshooting
 

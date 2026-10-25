@@ -65,7 +65,9 @@ pub fn set_text(text: &str) -> bool {
 /// True when running under Wayland (WAYLAND_DISPLAY is set and non-empty).
 #[cfg(target_os = "linux")]
 fn on_wayland() -> bool {
-    std::env::var("WAYLAND_DISPLAY").map(|v| !v.is_empty()).unwrap_or(false)
+    std::env::var("WAYLAND_DISPLAY")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
 }
 
 /// EXPERIMENTAL: untested on real hardware. Uses wl-paste on Wayland, otherwise

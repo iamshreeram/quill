@@ -36,11 +36,17 @@ pub fn ensure_private_dir(path: &Path) -> Result<(), String> {
             if path.is_dir() {
                 Ok(())
             } else {
-                Err(format!("{} is a symlink to a missing target", display_name(path)))
+                Err(format!(
+                    "{} is a symlink to a missing target",
+                    display_name(path)
+                ))
             }
         }
         Ok(meta) if meta.is_dir() => repair_dir_mode(path),
-        Ok(_) => Err(format!("{} exists and is not a directory", display_name(path))),
+        Ok(_) => Err(format!(
+            "{} exists and is not a directory",
+            display_name(path)
+        )),
         Err(_) => create_private_dir(path),
     }
 }
@@ -73,7 +79,8 @@ fn new_dir_builder() -> fs::DirBuilder {
 #[cfg(unix)]
 fn repair_dir_mode(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
-    let meta = fs::metadata(path).map_err(|e| format!("failed to inspect {}: {e}", display_name(path)))?;
+    let meta =
+        fs::metadata(path).map_err(|e| format!("failed to inspect {}: {e}", display_name(path)))?;
     if meta.permissions().mode() & 0o777 != 0o700 {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))
             .map_err(|e| format!("failed to chmod {}: {e}", display_name(path)))?;
@@ -122,7 +129,11 @@ pub fn write_atomic_mode(path: &Path, bytes: &[u8], mode: u32) -> Result<(), Str
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let tmp = dir.join(format!(".{name}.{}.{}.tmp", std::process::id(), unique_suffix()));
+    let tmp = dir.join(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        unique_suffix()
+    ));
     match write_then_rename(&tmp, path, bytes, mode) {
         Ok(()) => Ok(()),
         Err(e) => {

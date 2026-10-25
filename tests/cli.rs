@@ -46,7 +46,10 @@ struct Req {
 impl Req {
     fn header(&self, name: &str) -> Option<String> {
         let n = name.to_ascii_lowercase();
-        self.headers.iter().find(|(k, _)| *k == n).map(|(_, v)| v.clone())
+        self.headers
+            .iter()
+            .find(|(k, _)| *k == n)
+            .map(|(_, v)| v.clone())
     }
     fn json(&self) -> Value {
         serde_json::from_str(&self.body).expect("request body is JSON")
@@ -152,7 +155,12 @@ impl Mock {
                 }
             }
         });
-        Mock { url: format!("http://127.0.0.1:{port}/v1/messages"), reqs, stop, th: Some(th) }
+        Mock {
+            url: format!("http://127.0.0.1:{port}/v1/messages"),
+            reqs,
+            stop,
+            th: Some(th),
+        }
     }
     fn ok(text: &str) -> Mock {
         Mock::start(Mode::Json(200, ok_body(text)))
@@ -177,7 +185,15 @@ impl Drop for Mock {
 // ───────────────────────── sealed environment ─────────────────────────
 
 const SENTINELS: &[&str] = &[
-    "pbpaste", "pbcopy", "skhd", "osascript", "xclip", "xsel", "wl-paste", "wl-copy", "powershell",
+    "pbpaste",
+    "pbcopy",
+    "skhd",
+    "osascript",
+    "xclip",
+    "xsel",
+    "wl-paste",
+    "wl-copy",
+    "powershell",
 ];
 
 struct Env {
@@ -207,7 +223,10 @@ impl Env {
         let env = Env { root, home, bin };
         for name in SENTINELS {
             let log = env.root.join("sentinel.log");
-            env.install_fake(name, &format!("#!/bin/sh\necho {} >> '{}'\nexit 99\n", name, log.display()));
+            env.install_fake(
+                name,
+                &format!("#!/bin/sh\necho {} >> '{}'\nexit 99\n", name, log.display()),
+            );
         }
         env
     }
@@ -229,7 +248,10 @@ impl Env {
         p
     }
     fn cfg(&self, url: &str) {
-        self.write_conf("config.toml", &format!("[api]\nurl = \"{url}\"\nkey = \"{KEY}\"\n"));
+        self.write_conf(
+            "config.toml",
+            &format!("[api]\nurl = \"{url}\"\nkey = \"{KEY}\"\n"),
+        );
     }
     fn sentinel_hits(&self) -> String {
         fs::read_to_string(self.root.join("sentinel.log")).unwrap_or_default()
@@ -299,7 +321,10 @@ fn model_of(r: &Req) -> String {
 }
 
 fn user_text(r: &Req) -> String {
-    r.json()["messages"][0]["content"][0]["text"].as_str().unwrap().to_string()
+    r.json()["messages"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 fn system_text(r: &Req) -> String {
@@ -320,7 +345,10 @@ fn t01_init_creates_private_config() {
     let text = fs::read_to_string(&cfg).unwrap();
     assert!(text.contains("YOUR_API_KEY_HERE"));
     for bad in ["user_type", "user_name"] {
-        assert!(!text.to_lowercase().contains(&bad.to_lowercase()), "{bad} in sample config");
+        assert!(
+            !text.to_lowercase().contains(&bad.to_lowercase()),
+            "{bad} in sample config"
+        );
     }
     env.assert_no_sentinel();
 }
@@ -343,7 +371,10 @@ fn t03_init_uses_env_values() {
     let out = env.run(
         &["init"],
         None,
-        &[("QUILL_API_URL", "https://llm.example.test/v1/messages"), ("QUILL_API_KEY", "abc123secret")],
+        &[
+            ("QUILL_API_URL", "https://llm.example.test/v1/messages"),
+            ("QUILL_API_KEY", "abc123secret"),
+        ],
     );
     assert_eq!(out.code, 0, "{}", out.stderr);
     let cfg = env.conf().join("config.toml");
@@ -367,13 +398,22 @@ fn t04_stdin_minimal_config_uses_defaults() {
     let r = m.req(0);
     assert_eq!(r.header("x-api-key").as_deref(), Some(KEY));
     assert_eq!(r.header("anthropic-version").as_deref(), Some("2023-06-01"));
-    assert!(r.header("content-type").unwrap().contains("application/json"));
+    assert!(r
+        .header("content-type")
+        .unwrap()
+        .contains("application/json"));
     assert!(r.header("authorization").is_none());
     assert_eq!(model_of(&r), "claude-sonnet-4-5");
     let t = user_text(&r);
-    assert!(t.contains("hello world") && t.contains("Instruction:"), "{t}");
+    assert!(
+        t.contains("hello world") && t.contains("Instruction:"),
+        "{t}"
+    );
     assert!(!system_text(&r).is_empty());
-    assert!(!env.conf().join("history.jsonl").exists(), "--stdin must not write history");
+    assert!(
+        !env.conf().join("history.jsonl").exists(),
+        "--stdin must not write history"
+    );
     env.assert_no_sentinel();
 }
 
@@ -388,7 +428,10 @@ fn t05_bearer_auth_and_custom_headers() {
     let out = env.run(&["--stdin"], Some("hi"), &[]);
     assert_eq!(out.code, 0, "{}", out.stderr);
     let r = m.req(0);
-    assert_eq!(r.header("authorization").as_deref(), Some("Bearer test-key-123"));
+    assert_eq!(
+        r.header("authorization").as_deref(),
+        Some("Bearer test-key-123")
+    );
     assert!(r.header("x-api-key").is_none());
     assert_eq!(r.header("x-gateway-tenant").as_deref(), Some("tenant-1"));
 }
@@ -400,7 +443,11 @@ fn t06_env_only_configuration() {
     let out = env.run(
         &["--stdin"],
         Some("hi"),
-        &[("QUILL_API_URL", &m.url), ("QUILL_API_KEY", "envkey"), ("QUILL_MODEL", "my-model")],
+        &[
+            ("QUILL_API_URL", &m.url),
+            ("QUILL_API_KEY", "envkey"),
+            ("QUILL_MODEL", "my-model"),
+        ],
     );
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert_eq!(out.stdout, "from env\n");
@@ -414,10 +461,17 @@ fn t07_missing_or_placeholder_key_is_rejected() {
     for key in ["", "   ", "YOUR_API_KEY_HERE"] {
         let env = Env::new();
         let m = Mock::ok("x");
-        env.write_conf("config.toml", &format!("[api]\nurl = \"{}\"\nkey = \"{}\"\n", m.url, key));
+        env.write_conf(
+            "config.toml",
+            &format!("[api]\nurl = \"{}\"\nkey = \"{}\"\n", m.url, key),
+        );
         let out = env.run(&["--stdin"], Some("hi"), &[]);
         assert_eq!(out.code, 1, "key {key:?}");
-        assert!(out.stderr.contains("api.key") || out.stderr.contains("QUILL_API_KEY"), "{}", out.stderr);
+        assert!(
+            out.stderr.contains("api.key") || out.stderr.contains("QUILL_API_KEY"),
+            "{}",
+            out.stderr
+        );
         assert_eq!(m.count(), 0);
     }
 }
@@ -429,7 +483,11 @@ fn t08_plain_http_to_non_loopback_is_rejected() {
     let out = env.run(&["--stdin"], Some("hi"), &[]);
     assert_eq!(out.code, 1);
     assert!(out.stderr.contains("https"), "{}", out.stderr);
-    assert!(out.secs < 4.0, "must be rejected before any network I/O ({}s)", out.secs);
+    assert!(
+        out.secs < 4.0,
+        "must be rejected before any network I/O ({}s)",
+        out.secs
+    );
 }
 
 #[test]
@@ -466,17 +524,35 @@ fn t10_prompt_profiles() {
     let m = Mock::ok("x");
     env.cfg(&m.url);
     env.write_conf("prompts/formal.txt", "FORMAL-INSTR-TEXT\n");
-    assert_eq!(env.run(&["--stdin", "-p", "formal"], Some("hi"), &[]).code, 0);
+    assert_eq!(
+        env.run(&["--stdin", "-p", "formal"], Some("hi"), &[]).code,
+        0
+    );
     assert!(user_text(&m.req(0)).contains("FORMAL-INSTR-TEXT"));
-    assert_eq!(env.run(&["--stdin", "--prompt", "formal"], Some("hi"), &[]).code, 0);
+    assert_eq!(
+        env.run(&["--stdin", "--prompt", "formal"], Some("hi"), &[])
+            .code,
+        0
+    );
     assert!(user_text(&m.req(1)).contains("FORMAL-INSTR-TEXT"));
-    assert_eq!(env.run(&["--stdin"], Some("hi"), &[("QUILL_PROMPT", "formal")]).code, 0);
+    assert_eq!(
+        env.run(&["--stdin"], Some("hi"), &[("QUILL_PROMPT", "formal")])
+            .code,
+        0
+    );
     assert!(user_text(&m.req(2)).contains("FORMAL-INSTR-TEXT"));
     let before = m.count();
-    assert_eq!(env.run(&["--stdin", "-p", "nosuch"], Some("hi"), &[]).code, 1);
+    assert_eq!(
+        env.run(&["--stdin", "-p", "nosuch"], Some("hi"), &[]).code,
+        1
+    );
     assert_eq!(env.run(&["--stdin", "-p", "../x"], Some("hi"), &[]).code, 1);
     assert_eq!(env.run(&["--stdin", "-p", "a/b"], Some("hi"), &[]).code, 1);
-    assert_eq!(m.count(), before, "invalid profile names must not reach the network");
+    assert_eq!(
+        m.count(),
+        before,
+        "invalid profile names must not reach the network"
+    );
 }
 
 #[test]
@@ -543,8 +619,14 @@ fn install_clipboard_fakes(env: &Env, clip_in: &str) -> PathBuf {
     let cin = env.root.join("clip_in.txt");
     let cout = env.root.join("clip_out.txt");
     fs::write(&cin, clip_in).unwrap();
-    env.install_fake("pbpaste", &format!("#!/bin/sh\n/bin/cat '{}'\n", cin.display()));
-    env.install_fake("pbcopy", &format!("#!/bin/sh\n/bin/cat > '{}'\n", cout.display()));
+    env.install_fake(
+        "pbpaste",
+        &format!("#!/bin/sh\n/bin/cat '{}'\n", cin.display()),
+    );
+    env.install_fake(
+        "pbcopy",
+        &format!("#!/bin/sh\n/bin/cat > '{}'\n", cout.display()),
+    );
     cout
 }
 
@@ -561,7 +643,11 @@ fn t15_now_uses_clipboard_and_writes_private_history() {
     let out = env.run(&["--now"], None, &[]);
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert_eq!(fs::read_to_string(&cout).unwrap().trim(), "Result text");
-    let lines: Vec<String> = fs::read_to_string(&hist).unwrap().lines().map(|s| s.to_string()).collect();
+    let lines: Vec<String> = fs::read_to_string(&hist)
+        .unwrap()
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
     assert_eq!(lines.len(), 1);
     let v: Value = serde_json::from_str(&lines[0]).unwrap();
     assert_eq!(v["before"], "clipboard input");
@@ -581,7 +667,9 @@ fn t16_learn_updates_context_and_clears_history() {
     );
     let out = env.run(&["learn"], None, &[]);
     assert_eq!(out.code, 0, "{}", out.stderr);
-    assert!(fs::read_to_string(env.conf().join("context.md")).unwrap().contains("LEARNED-MARKER"));
+    assert!(fs::read_to_string(env.conf().join("context.md"))
+        .unwrap()
+        .contains("LEARNED-MARKER"));
     assert_eq!(fs::read_to_string(&hist).unwrap().trim(), "");
     assert_eq!(m.count(), 1);
     // no history => exit 1, no request
@@ -601,7 +689,10 @@ const END: &str = "# <<< quill managed block v1 <<<";
 #[cfg(target_os = "macos")]
 fn fake_skhd(env: &Env) -> PathBuf {
     let log = env.root.join("skhd.log");
-    env.install_fake("skhd", &format!("#!/bin/sh\necho \"$@\" >> '{}'\nexit 0\n", log.display()));
+    env.install_fake(
+        "skhd",
+        &format!("#!/bin/sh\necho \"$@\" >> '{}'\nexit 0\n", log.display()),
+    );
     log
 }
 
@@ -617,12 +708,28 @@ fn t17_setup_uses_a_managed_skhd_block() {
     let out = env.run(&["setup"], None, &[]);
     assert_eq!(out.code, 0, "{}", out.stderr);
     let after = fs::read_to_string(&rc).unwrap();
-    assert!(after.starts_with(original), "unrelated bytes must be preserved:\n{after}");
+    assert!(
+        after.starts_with(original),
+        "unrelated bytes must be preserved:\n{after}"
+    );
     assert_eq!(after.matches(BEGIN).count(), 1);
     assert_eq!(after.matches(END).count(), 1);
-    let block: Vec<&str> = after.split(BEGIN).nth(1).unwrap().split(END).next().unwrap().lines().filter(|l| !l.trim().is_empty()).collect();
+    let block: Vec<&str> = after
+        .split(BEGIN)
+        .nth(1)
+        .unwrap()
+        .split(END)
+        .next()
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
     assert_eq!(block.len(), 1, "{block:?}");
-    assert!(block[0].starts_with("cmd + shift - c : ") && block[0].ends_with("hotkey.sh'"), "{}", block[0]);
+    assert!(
+        block[0].starts_with("cmd + shift - c : ") && block[0].ends_with("hotkey.sh'"),
+        "{}",
+        block[0]
+    );
     // idempotent
     assert_eq!(env.run(&["setup"], None, &[]).code, 0);
     assert_eq!(after, fs::read_to_string(&rc).unwrap());
@@ -634,8 +741,13 @@ fn t17_setup_uses_a_managed_skhd_block() {
     assert!(script.contains("umask 077"));
     assert!(script.contains("quill.log"));
     let ok = Command::new("/bin/sh").arg("-n").arg(&hk).status().unwrap();
-    assert!(ok.success(), "hotkey.sh must be valid sh even with a space/apostrophe in HOME:\n{script}");
-    assert!(fs::read_to_string(&skhd_log).unwrap().contains("--restart-service"));
+    assert!(
+        ok.success(),
+        "hotkey.sh must be valid sh even with a space/apostrophe in HOME:\n{script}"
+    );
+    assert!(fs::read_to_string(&skhd_log)
+        .unwrap()
+        .contains("--restart-service"));
     // unbalanced marker => exit 1, bytes unchanged
     let broken = format!("{original}{BEGIN}\nstray\n");
     fs::write(&rc, &broken).unwrap();
@@ -657,7 +769,11 @@ fn t17_setup_uses_a_managed_skhd_block() {
     env2.remove_fake("skhd");
     let out4 = env2.run(&["setup"], None, &[]);
     assert_eq!(out4.code, 0, "{}", out4.stderr);
-    assert!(out4.stderr.to_lowercase().contains("skhd"), "{}", out4.stderr);
+    assert!(
+        out4.stderr.to_lowercase().contains("skhd"),
+        "{}",
+        out4.stderr
+    );
 }
 
 #[test]
@@ -667,12 +783,18 @@ fn t18_help_and_version() {
         let out = env.run(&a, None, &[]);
         assert_eq!(out.code, 0, "{a:?} {}", out.stderr);
         let all = format!("{}{}", out.stdout, out.stderr);
-        assert!(all.contains("quill init") && all.contains("--stdin"), "{all}");
+        assert!(
+            all.contains("quill init") && all.contains("--stdin"),
+            "{all}"
+        );
     }
     for a in ["--version", "-V"] {
         let out = env.run(&[a], None, &[]);
         assert_eq!(out.code, 0);
-        assert_eq!(out.stdout.trim(), format!("quill {}", env!("CARGO_PKG_VERSION")));
+        assert_eq!(
+            out.stdout.trim(),
+            format!("quill {}", env!("CARGO_PKG_VERSION"))
+        );
     }
     assert_eq!(env!("CARGO_PKG_VERSION"), "0.4.0");
     env.assert_no_sentinel();
@@ -682,11 +804,21 @@ fn t18_help_and_version() {
 fn t19_request_timeout() {
     let env = Env::new();
     let m = Mock::start(Mode::Hang);
-    env.write_conf("config.toml", &format!("[api]\nurl = \"{}\"\nkey = \"{KEY}\"\ntimeout_secs = 1\n", m.url));
+    env.write_conf(
+        "config.toml",
+        &format!(
+            "[api]\nurl = \"{}\"\nkey = \"{KEY}\"\ntimeout_secs = 1\n",
+            m.url
+        ),
+    );
     let out = env.run(&["--stdin"], Some("hi"), &[]);
     assert_eq!(out.code, 1);
     assert!(out.secs < 8.0, "{}s", out.secs);
-    assert!(out.stderr.to_lowercase().contains("timeout"), "{}", out.stderr);
+    assert!(
+        out.stderr.to_lowercase().contains("timeout"),
+        "{}",
+        out.stderr
+    );
 }
 
 #[test]
@@ -709,7 +841,11 @@ fn t21_invalid_url_schemes_are_rejected() {
         env.cfg(url);
         let out = env.run(&["--stdin"], Some("hi"), &[]);
         assert_eq!(out.code, 1, "url {url:?}");
-        assert!(out.stderr.contains("api.url") || out.stderr.contains("QUILL_API_URL"), "{}", out.stderr);
+        assert!(
+            out.stderr.contains("api.url") || out.stderr.contains("QUILL_API_URL"),
+            "{}",
+            out.stderr
+        );
         assert!(out.secs < 4.0);
     }
 }
@@ -721,8 +857,14 @@ fn t22_url_with_userinfo_is_rejected_and_not_echoed() {
     let out = env.run(&["--stdin"], Some("hi"), &[]);
     assert_eq!(out.code, 1);
     let all = format!("{}{}", out.stdout, out.stderr);
-    assert!(all.contains("api.url") || all.contains("QUILL_API_URL"), "{all}");
-    assert!(!all.contains("hunter2pw") && !all.contains("someuser"), "{all}");
+    assert!(
+        all.contains("api.url") || all.contains("QUILL_API_URL"),
+        "{all}"
+    );
+    assert!(
+        !all.contains("hunter2pw") && !all.contains("someuser"),
+        "{all}"
+    );
 }
 
 #[test]
@@ -739,7 +881,10 @@ fn t23_malformed_json_response() {
 
 #[test]
 fn t24_response_without_text_block() {
-    for body in ["{\"content\":[{\"type\":\"tool_use\"}]}", "{\"content\":[]}"] {
+    for body in [
+        "{\"content\":[{\"type\":\"tool_use\"}]}",
+        "{\"content\":[]}",
+    ] {
         let env = Env::new();
         let m = Mock::start(Mode::Json(200, body.into()));
         env.cfg(&m.url);
@@ -754,7 +899,13 @@ fn t24_response_without_text_block() {
 fn t25_unknown_auth_value() {
     let env = Env::new();
     let m = Mock::ok("x");
-    env.write_conf("config.toml", &format!("[api]\nurl = \"{}\"\nkey = \"{KEY}\"\nauth = \"basic\"\n", m.url));
+    env.write_conf(
+        "config.toml",
+        &format!(
+            "[api]\nurl = \"{}\"\nkey = \"{KEY}\"\nauth = \"basic\"\n",
+            m.url
+        ),
+    );
     let out = env.run(&["--stdin"], Some("hi"), &[]);
     assert_eq!(out.code, 1);
     assert!(out.stderr.contains("auth"), "{}", out.stderr);
@@ -766,7 +917,13 @@ fn t26_timeout_range() {
     for t in ["0", "601"] {
         let env = Env::new();
         let m = Mock::ok("x");
-        env.write_conf("config.toml", &format!("[api]\nurl = \"{}\"\nkey = \"{KEY}\"\ntimeout_secs = {t}\n", m.url));
+        env.write_conf(
+            "config.toml",
+            &format!(
+                "[api]\nurl = \"{}\"\nkey = \"{KEY}\"\ntimeout_secs = {t}\n",
+                m.url
+            ),
+        );
         let out = env.run(&["--stdin"], Some("hi"), &[]);
         assert_eq!(out.code, 1, "timeout {t}");
         assert!(out.stderr.contains("timeout_secs"), "{}", out.stderr);
@@ -782,30 +939,56 @@ fn t27_redirects_are_not_followed() {
     env.cfg(&redirector.url);
     let out = env.run(&["--stdin"], Some("hi"), &[]);
     assert_eq!(out.code, 1);
-    assert!(out.stderr.to_lowercase().contains("redirect"), "{}", out.stderr);
+    assert!(
+        out.stderr.to_lowercase().contains("redirect"),
+        "{}",
+        out.stderr
+    );
     assert_eq!(redirector.count(), 1);
-    assert_eq!(target.count(), 0, "a redirect target must never receive the request");
+    assert_eq!(
+        target.count(),
+        0,
+        "a redirect target must never receive the request"
+    );
 }
 
 #[test]
 fn t28_reserved_and_invalid_headers_are_rejected() {
-    for h in ["Authorization", "X-API-Key", "Content-Type", "Host", "anthropic-version", "Cookie", "Proxy-Authorization"] {
+    for h in [
+        "Authorization",
+        "X-API-Key",
+        "Content-Type",
+        "Host",
+        "anthropic-version",
+        "Cookie",
+        "Proxy-Authorization",
+    ] {
         let env = Env::new();
         let m = Mock::ok("x");
         env.write_conf(
             "config.toml",
-            &format!("[api]\nurl = \"{}\"\nkey = \"{KEY}\"\n[api.headers]\n\"{h}\" = \"x\"\n", m.url),
+            &format!(
+                "[api]\nurl = \"{}\"\nkey = \"{KEY}\"\n[api.headers]\n\"{h}\" = \"x\"\n",
+                m.url
+            ),
         );
         let out = env.run(&["--stdin"], Some("hi"), &[]);
         assert_eq!(out.code, 1, "{h}");
-        assert!(out.stderr.to_lowercase().contains("header"), "{}", out.stderr);
+        assert!(
+            out.stderr.to_lowercase().contains("header"),
+            "{}",
+            out.stderr
+        );
         assert_eq!(m.count(), 0, "{h}");
     }
     let env = Env::new();
     let m = Mock::ok("x");
     env.write_conf(
         "config.toml",
-        &format!("[api]\nurl = \"{}\"\nkey = \"{KEY}\"\n[api.headers]\nX-Ok = \"a\\nb\"\n", m.url),
+        &format!(
+            "[api]\nurl = \"{}\"\nkey = \"{KEY}\"\n[api.headers]\nX-Ok = \"a\\nb\"\n",
+            m.url
+        ),
     );
     let out = env.run(&["--stdin"], Some("hi"), &[]);
     assert_eq!(out.code, 1);
@@ -822,14 +1005,21 @@ fn t29_connection_refused_is_sanitized() {
     let out = env.run(&["--stdin"], Some("hi"), &[]);
     assert_eq!(out.code, 1);
     assert!(out.stderr.contains("request failed"), "{}", out.stderr);
-    assert!(!out.stderr.contains("127.0.0.1") && !out.stderr.contains(&port.to_string()), "{}", out.stderr);
+    assert!(
+        !out.stderr.contains("127.0.0.1") && !out.stderr.contains(&port.to_string()),
+        "{}",
+        out.stderr
+    );
 }
 
 #[test]
 fn t30_permissive_existing_files_are_repaired() {
     let env = Env::new();
     let m = Mock::ok("x");
-    let cfg = env.write_conf("config.toml", &format!("[api]\nurl = \"{}\"\nkey = \"{KEY}\"\n", m.url));
+    let cfg = env.write_conf(
+        "config.toml",
+        &format!("[api]\nurl = \"{}\"\nkey = \"{KEY}\"\n", m.url),
+    );
     let ctx = env.write_conf("context.md", "ctx\n");
     fs::set_permissions(&cfg, fs::Permissions::from_mode(0o644)).unwrap();
     fs::set_permissions(&ctx, fs::Permissions::from_mode(0o644)).unwrap();
@@ -847,7 +1037,10 @@ fn t31_symlinked_sensitive_files_are_refused() {
     let env = Env::new();
     let m = Mock::ok("# new context\n- x\n");
     env.cfg(&m.url);
-    env.write_conf("history.jsonl", "{\"timestamp\":\"unix:1\",\"before\":\"a\",\"after\":\"b\"}\n");
+    env.write_conf(
+        "history.jsonl",
+        "{\"timestamp\":\"unix:1\",\"before\":\"a\",\"after\":\"b\"}\n",
+    );
     let victim = env.root.join("victim_ctx.txt");
     fs::write(&victim, "VICTIM-ORIG").unwrap();
     symlink(&victim, env.conf().join("context.md")).unwrap();
@@ -876,7 +1069,11 @@ fn t31b_now_with_symlinked_history_keeps_victim_untouched() {
     symlink(&victim, env.conf().join("history.jsonl")).unwrap();
     let out = env.run(&["--now"], None, &[]);
     assert_eq!(out.code, 0, "{}", out.stderr);
-    assert!(out.stderr.to_lowercase().contains("symlink"), "{}", out.stderr);
+    assert!(
+        out.stderr.to_lowercase().contains("symlink"),
+        "{}",
+        out.stderr
+    );
     assert_eq!(fs::read_to_string(&victim).unwrap(), "VICTIM-ORIG");
 }
 
@@ -886,8 +1083,12 @@ fn t32_no_real_tool_was_touched_by_basic_flows() {
     let m = Mock::ok("x");
     env.cfg(&m.url);
     assert_eq!(env.run(&["--stdin"], Some("hi"), &[]).code, 0);
-assert_eq!(env.run(&["check"], None, &[]).code, 0);
-    assert_eq!(m.count(), 2, "stdin and check must each send exactly one request");
+    assert_eq!(env.run(&["check"], None, &[]).code, 0);
+    assert_eq!(
+        m.count(),
+        2,
+        "stdin and check must each send exactly one request"
+    );
     env.assert_no_sentinel();
 }
 
@@ -896,7 +1097,9 @@ fn t33_toml_parse_errors_do_not_echo_the_key_line() {
     let env = Env::new();
     env.write_conf(
         "config.toml",
-        &format!("[api]\nurl = \"https://llm.example.test/v1/messages\"\nkey = \"{KEY}\" garbage\n"),
+        &format!(
+            "[api]\nurl = \"https://llm.example.test/v1/messages\"\nkey = \"{KEY}\" garbage\n"
+        ),
     );
     let out = env.run(&["--stdin"], Some("hi"), &[]);
     assert_eq!(out.code, 1);
@@ -918,6 +1121,33 @@ fn t34_setup_refuses_a_symlinked_log() {
     symlink(&victim, env.conf().join("quill.log")).unwrap();
     let out = env.run(&["setup"], None, &[]);
     assert_eq!(out.code, 1, "{}", out.stderr);
-    assert!(out.stderr.to_lowercase().contains("symlink"), "{}", out.stderr);
+    assert!(
+        out.stderr.to_lowercase().contains("symlink"),
+        "{}",
+        out.stderr
+    );
     assert_eq!(fs::read_to_string(&victim).unwrap(), "VICTIM-ORIG");
+}
+
+#[test]
+fn t35_type_errors_do_not_echo_misplaced_values() {
+    let misplaced = "misplaced-value-42";
+    let bodies = [
+        format!("[api]\nurl = \"https://llm.example.test/v1/messages\"\nkey = \"{KEY}\"\ntimeout_secs = \"{misplaced}\"\n"),
+        format!("[api]\nurl = \"https://llm.example.test/v1/messages\"\nkey = \"{KEY}\"\nheaders = \"{misplaced}\"\n"),
+        format!("api = \"{misplaced}\"\n"),
+        format!("[transform]\nmax_tokens = \"{misplaced}\"\n"),
+    ];
+    for body in bodies {
+        let env = Env::new();
+        env.write_conf("config.toml", &body);
+        let out = env.run(&["--stdin"], Some("hi"), &[]);
+        assert_eq!(out.code, 1, "{body}");
+        let all = format!("{}{}", out.stdout, out.stderr);
+        assert!(all.to_lowercase().contains("invalid config"), "{all}");
+        assert!(
+            !all.contains(misplaced) && !all.contains(KEY),
+            "leaked a value: {all}"
+        );
+    }
 }
