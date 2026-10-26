@@ -486,46 +486,34 @@ Failures are logged to `~/.config/quill/quill.log`.
 - Versions follow [Semantic Versioning](https://semver.org/). The version is the `version` field in the `[package]` section of `Cargo.toml`.
 - [`CHANGELOG.md`](CHANGELOG.md) follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Each release has a `## [X.Y.Z] - YYYY-MM-DD` heading. Pending changes sit under `## [Unreleased]`.
 
-### Release procedure (maintainers)
+### Automatic releases (maintainers)
 
-1. Add entries under `## [Unreleased]` in `CHANGELOG.md` and commit them on `main`. The working tree must be clean, and the `[Unreleased]` section must not be empty.
-2. Preview the release. Nothing is changed:
+Releases are automatic. Maintainers never run a release script and never push tags by hand.
 
-   ```bash
-   scripts/release.sh --dry-run minor
-   ```
-
-3. Cut the release. `minor` can be `patch`, `minor`, `major` or an explicit `X.Y.Z[-pre]`. The script bumps `Cargo.toml` and `Cargo.lock`, moves `[Unreleased]` to the new version with today's date, creates a commit `chore(release): vX.Y.Z` and an annotated tag `vX.Y.Z`. It never pushes.
-
-   ```bash
-   scripts/release.sh minor
-   ```
-
-4. Push the commit and the tag:
-
-   ```bash
-   git push origin main --follow-tags
-   ```
-
-The script must run on `main`, and the tag must not already exist.
-
-### What the tag triggers
-
-Pushing a tag shaped like `v<major>.<minor>.<patch>` (optionally with a suffix such as `-rc.1`) starts `.github/workflows/release.yml`:
-
-1. **verify**: checks that the tag matches `Cargo.toml` and has a matching `CHANGELOG.md` heading, then runs `cargo test --locked`.
-2. **build**: builds the binary for five targets with `--locked`: `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` (on Ubuntu 22.04 runners, to keep the glibc 2.35 baseline), `x86_64-apple-darwin`, `aarch64-apple-darwin`, and `x86_64-pc-windows-msvc`. Each binary is smoke-tested (`--version`, and an offline `--stdin` run) before packaging.
-3. **publish**: requires the archives and checksums of the four supported targets (Linux and macOS, x86_64 and aarch64), merges the per-target `SHA256SUMS` files, verifies every archive, and creates the GitHub Release. The Windows build is experimental: if it fails, the release is still published without the Windows zip and the workflow shows a warning. The release notes are the `CHANGELOG.md` section for the version. The release also attaches `install.sh` and `install.ps1`. A tag with a hyphen (for example `v1.0.0-rc.1`) is published as a prerelease.
+- Every push or merge to `main` runs `.github/workflows/release.yml`. Its `plan` job decides whether to release.
+- Docs-only changes (`*.md`, `LICENSE`, `.gitignore`) do not release, unless unreleased code changes are already pending.
+- Putting `[skip release]` in the head commit message skips the release for that push.
+- The version always increases by exactly one minor: `0.5.0` becomes `0.6.0`, then `0.7.0`. It is never a patch or major bump. The base is the higher of the highest stable `vX.Y.Z` tag and the `Cargo.toml` version. Prerelease and non-SemVer tags are ignored.
+- Pipeline: the `verify` job runs the tests, then `build` produces binaries for five targets (Linux and macOS, x86_64 and aarch64, plus Windows). The Windows build is experimental and never blocks a release. Then `publish` runs.
+- `publish` bumps `Cargo.toml`, `Cargo.lock` and `CHANGELOG.md` in a `chore(release): vX.Y.Z [skip ci]` commit pushed to `main` by `github-actions[bot]`. It tags that commit and creates the GitHub Release with the archives, `SHA256SUMS`, `install.sh` and `install.ps1`. It then writes the completion marker ref `refs/published/vX.Y.Z`.
+- Release notes come from the `[Unreleased]` section of `CHANGELOG.md` when it has bullets. Otherwise they come from the commit subjects since the last tag. Write meaningful commit subjects, or curate `[Unreleased]` before merging.
+- Recovery: if a run dies after pushing the tag, the next run (or Actions > Release > Run workflow) finishes the same release without bumping the version again.
+- Owner override: the `recover_tag` input on Actions > Release > Run workflow finishes a specific tag.
+- Deleting a release on purpose after it completed does not recreate it.
+- Dry run: the `dry_run` input on Actions > Release > Run workflow builds everything and publishes nothing.
+- Starting a new major (for example `1.0.0`): in a normal commit, set the version in `Cargo.toml` and `Cargo.lock` to the new base (for example `1.0.0`). The next automatic release is then `1.1.0`.
+- After each automatic release, run `git pull` before your next push: the release commit lands on `main` ahead of your local copy.
+- `main` must allow `github-actions[bot]` to push. Use no branch protection that requires pull requests, or add a ruleset bypass for the bot.
 
 Asset names are `quill-<version>-<target>.tar.gz` (Unix) or `quill-<version>-<target>.zip` (Windows). Each archive contains the binary, `LICENSE`, `README.md` and `config.sample.toml` in a directory of the same name.
 
 ### Continuous integration
 
-`.github/workflows/ci.yml` runs on pushes to `main` and on pull requests:
-
-- **lint** (Ubuntu): `cargo fmt --all -- --check` and `cargo clippy --locked --all-targets -- -D warnings`.
-- **test** (Ubuntu, macOS, Windows): `cargo build --locked` and `cargo test --locked`. The Windows smoke test is experimental and cannot fail the job.
-- **scripts** (Ubuntu, macOS): `shellcheck` on `install.sh`, `scripts/*.sh` and `tests/*.sh`, then the installer tests (`tests/install_test.sh`) and the release script tests (`tests/release_scripts_test.sh`).
+- `.github/workflows/ci.yml` runs on pushes to `main` and on pull requests:
+  - **lint** (Ubuntu): `cargo fmt --all -- --check` and `cargo clippy --locked --all-targets -- -D warnings`.
+  - **test** (Ubuntu, macOS, Windows): `cargo build --locked` and `cargo test --locked`. The Windows smoke test is experimental and cannot fail the job.
+  - **scripts** (Ubuntu, macOS): `shellcheck` on `install.sh`, `scripts/*.sh` and `tests/*.sh`, then the installer tests (`tests/install_test.sh`), the release script tests (`tests/release_scripts_test.sh`) and the auto-release tests (`tests/auto_release_test.sh`).
+- `.github/workflows/release.yml` handles releases, as described above.
 
 ## Development
 

@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Self-healing release workflow (recovery and completion marker), `[skip release]` commit marker, and dry-run mode.
+
+### Changed
+- Releases are now fully automatic: every push or merge to main builds and publishes OS-specific binaries and bumps the minor version (no manual release script).
+
 ## [0.5.0] - 2026-10-26
 
 ### Added

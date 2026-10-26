@@ -1,5 +1,9 @@
-# Release pipeline: triggered by any tag shaped like v<major>.<minor>.<patch>, including
-# prereleases such as v1.0.0-rc.1 (which become GitHub prereleases).
+# Automatic release pipeline, run on every push to main. scripts/plan-release.sh decides the
+# mode: release (bump the minor version, build, tag, publish), recover (finish an
+# automation-owned tag whose release never completed), reconcile (release published but the
+# completion marker is missing: write the marker only) or skip (nothing to release).
+# Manual runs: Actions > Release > Run workflow. dry_run validates artifacts and stops;
+# recover_tag is the explicit owner override for recovering one tag.
 #
 # Experimental-Windows policy: the four supported targets (x86_64/aarch64 Linux-gnu,
 # x86_64/aarch64 Apple-darwin) are required. The Windows target is marked experimental
@@ -13,30 +17,104 @@ name: Release
 
 on:
   push:
-    tags: ['v*.*.*']
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Validate artifacts and print what publish would do; change nothing'
+        type: boolean
+        default: false
+      recover_tag:
+        description: 'Owner override: recover this existing tag, e.g. v0.5.1 (empty otherwise)'
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
-  verify:
-    name: verify tag
-    runs-on: ubuntu-22.04
+  plan:
+    name: plan release
+    if: github.repository == 'iamshreeram/quill'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      reason: ${{ steps.plan.outputs.reason }}
+      sha: ${{ steps.plan.outputs.sha }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      prev_tag: ${{ steps.plan.outputs.prev_tag }}
+      date: ${{ steps.plan.outputs.date }}
     steps:
       - uses: actions/checkout@v4
-      - name: Check tag matches Cargo.toml and CHANGELOG.md
-        run: bash scripts/check-version.sh "$GITHUB_REF_NAME"
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Decide what to release
+        id: plan
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PLAN_RECOVER_TAG: ${{ inputs.recover_tag }}
+        run: |
+          set -euo pipefail
+          plan_file="$RUNNER_TEMP/plan.txt"
+          bash scripts/plan-release.sh > "$plan_file"
+          cat "$plan_file"
+          cat "$plan_file" >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: verify
+    needs: plan
+    if: ${{ github.repository == 'iamshreeram/quill' && (needs.plan.outputs.mode == 'release' || needs.plan.outputs.mode == 'recover') }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    env:
+      MODE: ${{ needs.plan.outputs.mode }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      PREV_TAG: ${{ needs.plan.outputs.prev_tag }}
+      DATE: ${{ needs.plan.outputs.date }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.mode == 'recover' && format('refs/tags/{0}', needs.plan.outputs.tag) || needs.plan.outputs.sha }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install Linux build dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Apply version bump (release mode only)
+        if: ${{ needs.plan.outputs.mode == 'release' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bump_args=("$VERSION" --date "$DATE")
+          if [ -n "$PREV_TAG" ]; then bump_args+=(--prev-tag "$PREV_TAG"); fi
+          bash scripts/bump-version.sh "${bump_args[@]}"
+      - name: Check tag matches Cargo.toml and CHANGELOG.md
+        shell: bash
+        run: bash scripts/check-version.sh "v$VERSION"
       - name: Test
         run: cargo test --locked
 
   build:
     name: build ${{ matrix.target }}
-    needs: verify
+    needs: [plan, verify]
+    if: ${{ github.repository == 'iamshreeram/quill' && (needs.plan.outputs.mode == 'release' || needs.plan.outputs.mode == 'recover') }}
     # Experimental targets may fail without failing the job (see policy above).
     continue-on-error: ${{ matrix.experimental }}
+    env:
+      MODE: ${{ needs.plan.outputs.mode }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      PREV_TAG: ${{ needs.plan.outputs.prev_tag }}
+      DATE: ${{ needs.plan.outputs.date }}
     strategy:
       # Keep the supported targets running even if the experimental Windows build fails.
       fail-fast: false
@@ -60,12 +138,23 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.mode == 'recover' && format('refs/tags/{0}', needs.plan.outputs.tag) || needs.plan.outputs.sha }}
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Apply version bump (release mode only)
+        if: ${{ needs.plan.outputs.mode == 'release' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bump_args=("$VERSION" --date "$DATE")
+          if [ -n "$PREV_TAG" ]; then bump_args+=(--prev-tag "$PREV_TAG"); fi
+          bash scripts/bump-version.sh "${bump_args[@]}"
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Smoke test binary (Unix)
@@ -73,21 +162,18 @@ jobs:
         shell: bash
         env:
           BIN: target/${{ matrix.target }}/release/quill
-          EXPECTED_VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          test "$("$BIN" --version)" = "quill ${EXPECTED_VERSION#v}"
+          test "$("$BIN" --version)" = "quill $VERSION"
           echo 'this is an test' | "$BIN" --stdin --mode offline > out.txt
           grep -q 'a test' out.txt
       - name: Smoke test binary (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        env:
-          EXPECTED_VERSION: ${{ github.ref_name }}
         run: |
           $bin = "target\${{ matrix.target }}\release\quill.exe"
           $version = & $bin --version
-          if ($version -ne "quill $($env:EXPECTED_VERSION.Substring(1))") { throw "unexpected version: $version" }
+          if ($version -ne "quill $($env:VERSION)") { throw "unexpected version: $version" }
           # The GUI-subsystem binary only writes stdout when redirected to a file.
           "this is an test" | & $bin --stdin --mode offline > out.txt
           $out = Get-Content out.txt -Raw
@@ -95,7 +181,6 @@ jobs:
       - name: Package
         shell: bash
         env:
-          VERSION: ${{ github.ref_name }}
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
@@ -104,7 +189,7 @@ jobs:
           else
             bin="target/$TARGET/release/quill"
           fi
-          bash scripts/package.sh "$TARGET" "${VERSION#v}" "$bin" dist
+          bash scripts/package.sh "$TARGET" "$VERSION" "$bin" dist
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.target }}
@@ -113,33 +198,49 @@ jobs:
 
   publish:
     name: publish GitHub release
-    needs: [verify, build]
-    # Run whenever verify passed and the build job was not cancelled; build may report
-    # failure only through experimental targets, so the artifact check below decides.
-    if: ${{ !cancelled() && needs.verify.result == 'success' }}
+    needs: [plan, verify, build]
+    # Runs for a release/recover once verify passed; artifact validation below decides whether
+    # the supported targets are complete. Reconcile needs no verify or build at all.
+    if: ${{ !cancelled() && needs.plan.outputs.mode != 'skip' && github.repository == 'iamshreeram/quill' && (needs.plan.outputs.mode == 'reconcile' || needs.verify.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write
     env:
       GH_TOKEN: ${{ github.token }}
-      VERSION: ${{ github.ref_name }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      MODE: ${{ needs.plan.outputs.mode }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      PLAN_SHA: ${{ needs.plan.outputs.sha }}
+      PREV_TAG: ${{ needs.plan.outputs.prev_tag }}
+      DATE: ${{ needs.plan.outputs.date }}
+      TAG: ${{ needs.plan.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      # Release mode checks out main (the commit is made below); recover and reconcile check
+      # out the existing tag. All release files live under $RUNNER_TEMP, outside the workspace,
+      # so checkout cleaning cannot delete them.
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.mode == 'release' && 'main' || format('refs/tags/{0}', needs.plan.outputs.tag) }}
+          fetch-depth: 0
       - name: Download all release artifacts
+        if: ${{ needs.plan.outputs.mode != 'reconcile' }}
         uses: actions/download-artifact@v4
         with:
           pattern: release-*
-          path: artifacts
+          path: ${{ runner.temp }}/quill-release/artifacts
       - name: Check supported-target artifacts and detect Windows
+        if: ${{ needs.plan.outputs.mode != 'reconcile' }}
         shell: bash
         run: |
           set -euo pipefail
-          version="${VERSION#v}"
+          release_dir="$RUNNER_TEMP/quill-release"
           supported=(x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin)
           missing=()
           for target in "${supported[@]}"; do
-            for file in "quill-$version-$target.tar.gz" SHA256SUMS; do
-              [ -f "artifacts/release-$target/$file" ] || missing+=("release-$target/$file")
+            for file in "quill-$VERSION-$target.tar.gz" SHA256SUMS; do
+              [ -f "$release_dir/artifacts/release-$target/$file" ] || missing+=("release-$target/$file")
             done
           done
           if [ "${#missing[@]}" -gt 0 ]; then
@@ -148,55 +249,146 @@ jobs:
             exit 1
           fi
           # Every supported target is present; list the targets to publish.
-          : > "$RUNNER_TEMP/published-targets.txt"
-          printf '%s\n' "${supported[@]}" >> "$RUNNER_TEMP/published-targets.txt"
+          : > "$release_dir/published-targets.txt"
+          printf '%s\n' "${supported[@]}" >> "$release_dir/published-targets.txt"
           windows="x86_64-pc-windows-msvc"
-          if [ -f "artifacts/release-$windows/quill-$version-$windows.zip" ] \
-            && [ -f "artifacts/release-$windows/SHA256SUMS" ]; then
-            echo "$windows" >> "$RUNNER_TEMP/published-targets.txt"
+          if [ -f "$release_dir/artifacts/release-$windows/quill-$VERSION-$windows.zip" ] \
+            && [ -f "$release_dir/artifacts/release-$windows/SHA256SUMS" ]; then
+            echo "$windows" >> "$release_dir/published-targets.txt"
           else
             echo "::warning::Experimental Windows build was skipped or failed; this release has no Windows archive."
           fi
-          cat "$RUNNER_TEMP/published-targets.txt"
+          cat "$release_dir/published-targets.txt"
       - name: Merge checksums and verify archives
+        if: ${{ needs.plan.outputs.mode != 'reconcile' }}
         shell: bash
         run: |
           set -euo pipefail
-          version="${VERSION#v}"
-          mkdir -p dist
-          : > dist/fragments.txt
-          : > "$RUNNER_TEMP/expected-archives.txt"
+          release_dir="$RUNNER_TEMP/quill-release"
+          dist="$release_dir/dist"
+          mkdir -p "$dist"
+          : > "$release_dir/fragments.txt"
+          : > "$release_dir/expected-archives.txt"
           while read -r target; do
             case "$target" in
-              *windows*) archive="quill-$version-$target.zip" ;;
-              *) archive="quill-$version-$target.tar.gz" ;;
+              *windows*) archive="quill-$VERSION-$target.zip" ;;
+              *) archive="quill-$VERSION-$target.tar.gz" ;;
             esac
-            cp "artifacts/release-$target/$archive" dist/
-            echo "$archive" >> "$RUNNER_TEMP/expected-archives.txt"
-            cat "artifacts/release-$target/SHA256SUMS" >> dist/fragments.txt
-          done < "$RUNNER_TEMP/published-targets.txt"
+            cp "$release_dir/artifacts/release-$target/$archive" "$dist/"
+            echo "$archive" >> "$release_dir/expected-archives.txt"
+            cat "$release_dir/artifacts/release-$target/SHA256SUMS" >> "$release_dir/fragments.txt"
+          done < "$release_dir/published-targets.txt"
           # Merge the per-target fragments into one sorted, de-duplicated file.
-          LC_ALL=C sort -u -k2,2 dist/fragments.txt > dist/SHA256SUMS
-          rm -f dist/fragments.txt
-          cat dist/SHA256SUMS
+          LC_ALL=C sort -u -k2,2 "$release_dir/fragments.txt" > "$dist/SHA256SUMS"
+          rm -f "$release_dir/fragments.txt"
+          cat "$dist/SHA256SUMS"
           # The checksum file must cover exactly the archives being published.
-          diff <(sort "$RUNNER_TEMP/expected-archives.txt") <(awk '{ print $2 }' dist/SHA256SUMS | sort)
-          (cd dist && sha256sum -c SHA256SUMS)
-      - name: Build release notes
-        run: bash scripts/changelog-section.sh "${VERSION#v}" > notes.md
-      - name: Create GitHub release
+          diff <(sort "$release_dir/expected-archives.txt") <(awk '{ print $2 }' "$dist/SHA256SUMS" | sort)
+          (cd "$dist" && sha256sum -c SHA256SUMS)
+      - name: Dry run - report and stop
+        if: ${{ inputs.dry_run == true }}
         shell: bash
         run: |
           set -euo pipefail
-          if gh release view "$VERSION" >/dev/null 2>&1; then
-            echo "error: GitHub release $VERSION already exists; delete it manually before re-running" >&2
+          echo "dry run: mode=$MODE tag=$TAG version=$VERSION plan_sha=$PLAN_SHA"
+          case "$MODE" in
+            release) echo "would: bump to $VERSION, commit, tag $TAG, atomic push of main and the tag, create the GitHub release, write refs/published/$TAG" ;;
+            recover) echo "would: finish the GitHub release for $TAG (no bump, no push)" ;;
+            reconcile) echo "would: write the completion marker refs/published/$TAG only" ;;
+          esac
+          echo "dry run: stopping before any commit, push, release, marker or dispatch."
+      - name: Release commit and tag (release mode only)
+        id: release
+        if: ${{ inputs.dry_run != true && needs.plan.outputs.mode == 'release' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin "+refs/heads/main:refs/remotes/origin/main" --tags
+          # A previous attempt of this run may already have pushed the release commit and tag.
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            tag_commit="$(git rev-parse "refs/tags/$TAG^{commit}")"
+            tag_parent="$(git rev-parse -q --verify "$tag_commit^" || true)"
+            if [ "$tag_parent" = "$PLAN_SHA" ]; then
+              echo "::notice::$TAG was pushed by an earlier attempt of this run; finishing it without bumping again"
+              git checkout --quiet "refs/tags/$TAG"
+              { echo "proceed=true"; echo "pushed=already"; } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::tag $TAG already exists and is not the release commit of this run" >&2
             exit 1
           fi
-          flags=()
-          if [[ "$VERSION" == *-* ]]; then flags+=(--prerelease); fi
-          mapfile -t archives < <(awk '{ print $2 }' dist/SHA256SUMS)
-          assets=()
-          for archive in "${archives[@]}"; do assets+=("dist/$archive"); done
-          gh release create "$VERSION" --verify-tag --title "quill $VERSION" \
-            --notes-file notes.md "${flags[@]}" \
-            "${assets[@]}" dist/SHA256SUMS install.sh install.ps1
+          tip="$(git rev-parse origin/main)"
+          if [ "$tip" != "$PLAN_SHA" ]; then
+            echo "::notice::main moved from $PLAN_SHA to $tip; dispatching a new run that re-plans on the new tip"
+            gh workflow run release.yml --ref main -R "$GITHUB_REPOSITORY"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bump_args=("$VERSION" --date "$DATE")
+          if [ -n "$PREV_TAG" ]; then bump_args+=(--prev-tag "$PREV_TAG"); fi
+          bash scripts/bump-version.sh "${bump_args[@]}"
+          bash scripts/check-version.sh "v$VERSION"
+          git add -- Cargo.toml Cargo.lock CHANGELOG.md
+          bot=(-c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com')
+          git "${bot[@]}" commit -m "chore(release): v$VERSION [skip ci]"
+          git "${bot[@]}" tag -a "v$VERSION" -m "quill v$VERSION"
+          if git push --atomic origin HEAD:refs/heads/main "refs/tags/v$VERSION"; then
+            echo "pushed release commit and tag v$VERSION"
+          else
+            echo "::warning::push failed; checking whether an earlier attempt already created v$VERSION"
+            peeled="refs/tags/v$VERSION^{}"
+            remote_commit="$(git ls-remote --tags origin | awk -v want="$peeled" '$2 == want { print $1 }')"
+            head_commit="$(git rev-parse HEAD)"
+            if [ "$remote_commit" = "$head_commit" ]; then
+              echo "::notice::remote tag v$VERSION already points at our release commit; treating the push as done"
+            else
+              echo "::error::push failed and remote tag v$VERSION points at '${remote_commit:-nothing}', not $head_commit" >&2
+              exit 1
+            fi
+          fi
+          { echo "proceed=true"; echo "pushed=yes"; } >> "$GITHUB_OUTPUT"
+      - name: Build release notes
+        id: notes
+        if: ${{ inputs.dry_run != true && needs.plan.outputs.mode != 'reconcile' && steps.release.outputs.proceed != 'false' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/quill-release"
+          bash scripts/changelog-section.sh "$VERSION" > "$RUNNER_TEMP/quill-release/notes.md"
+      - name: Confirm release is published (reconcile mode only)
+        if: ${{ inputs.dry_run != true && needs.plan.outputs.mode == 'reconcile' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          is_draft="$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+          if [ "$is_draft" != "false" ]; then
+            echo "::error::reconcile expected a published release for $TAG, found isDraft=$is_draft" >&2
+            exit 1
+          fi
+      - name: Finish GitHub release
+        if: ${{ inputs.dry_run != true && needs.plan.outputs.mode != 'reconcile' && steps.release.outputs.proceed != 'false' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist="$RUNNER_TEMP/quill-release/dist"
+          notes="$RUNNER_TEMP/quill-release/notes.md"
+          (cd "$dist" && sha256sum -c SHA256SUMS)
+          cp install.sh install.ps1 "$dist/"
+          bash scripts/finish-release.sh "$TAG" "$dist" "$notes"
+      - name: Write completion marker
+        if: ${{ inputs.dry_run != true && steps.release.outputs.proceed != 'false' }}
+        shell: bash
+        run: bash scripts/mark-published.sh "$TAG"
+      - name: Dispatch run for pending changes
+        if: ${{ inputs.dry_run != true && steps.release.outputs.proceed != 'false' && (needs.plan.outputs.mode == 'recover' || needs.plan.outputs.mode == 'reconcile' || steps.release.outputs.pushed == 'already') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin "+refs/heads/main:refs/remotes/origin/main"
+          pending="$(git rev-list --count "$TAG..origin/main")"
+          if [ "$pending" -gt 0 ]; then
+            echo "$pending pending commit(s) on main after $TAG; dispatching a new run"
+            gh workflow run release.yml --ref main -R "$GITHUB_REPOSITORY"
+          else
+            echo "no pending commits on main after $TAG"
+          fi

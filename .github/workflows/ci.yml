@@ -89,3 +89,5 @@ jobs:
         run: bash tests/install_test.sh
       - name: Release script tests
         run: bash tests/release_scripts_test.sh
+      - name: Auto-release tests
+        run: bash tests/auto_release_test.sh

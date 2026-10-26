@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2015  # "A && B || fail" is intentional in assertions
-# Acceptance tests for scripts/check-version.sh, scripts/package.sh, scripts/release.sh
+# Acceptance tests for scripts/check-version.sh, scripts/package.sh
 # (spec: .ram-status/quill-modes-20251025-2255/DESIGN.md Rev 4, Part C).
 # Hermetic: every test works on a throwaway fixture repo selected via QUILL_REPO_ROOT; nothing here
 # touches the real repository, the network, or any remote.
@@ -12,7 +12,7 @@ ROOT="$(mktemp -d "${TMPDIR:-/tmp}/quill-release-test.XXXXXX")"
 PASS=0; FAILED=0; FAILED_NAMES=""
 trap 'rm -rf "$ROOT"' EXIT
 
-for s in check-version.sh package.sh release.sh; do
+for s in check-version.sh package.sh; do
   [ -f "$SCRIPTS/$s" ] || { echo "FAIL: scripts/$s does not exist"; exit 1; }
 done
 
@@ -68,7 +68,6 @@ EOF
   ( cd "$d" && git init -q -b "$b" . && git config user.email t@example.com && git config user.name t && git config commit.gpgsign false \
     && git config tag.gpgsign false && git add -A && git commit -q -m init )
 }
-git_clean() { [ -z "$(git -C "$1" status --porcelain)" ]; }
 
 # ───────── check-version.sh ─────────
 r01_check_version() {
@@ -128,90 +127,9 @@ PY
   done_test
 }
 
-# ───────── release.sh ─────────
-r03_release_dry_run_changes_nothing() {
-  new_test r03
-  make_repo "$T/repo" 0.4.0
-  QUILL_REPO_ROOT="$T/repo" run bash "$SCRIPTS/release.sh" --dry-run minor; check_code 0; has '0.5.0'
-  git_clean "$T/repo" || fail "dry run modified the tree"
-  [ -z "$(git -C "$T/repo" tag)" ] || fail "dry run created a tag"
-  [ "$(git -C "$T/repo" rev-list --count HEAD)" = "1" ] || fail "dry run created a commit"
-  done_test
-}
-
-r04_release_minor_bumps_files_commits_and_tags_without_pushing() {
-  new_test r04
-  make_repo "$T/repo" 0.4.0
-  git init -q --bare "$T/remote.git" && git -C "$T/repo" remote add origin "$T/remote.git"
-  QUILL_REPO_ROOT="$T/repo" run bash "$SCRIPTS/release.sh" minor; check_code 0
-  grep -q '^version = "0.5.0"' "$T/repo/Cargo.toml" || fail "Cargo.toml not bumped"
-  awk '/^name = "quill"/{f=1;next} f&&/^version/{print;exit}' "$T/repo/Cargo.lock" | grep -q '"0.5.0"' || fail "Cargo.lock quill entry not bumped"
-  awk '/^name = "other"/{f=1;next} f&&/^version/{print;exit}' "$T/repo/Cargo.lock" | grep -q '"0.4.0"' || fail "Cargo.lock other package was modified"
-  grep -q '^## \[Unreleased\]' "$T/repo/CHANGELOG.md" || fail "Unreleased heading lost"
-  grep -Eq '^## \[0.5.0\] - [0-9]{4}-[0-9]{2}-[0-9]{2}' "$T/repo/CHANGELOG.md" || fail "release heading missing"
-  awk '/^## \[0.5.0\]/{f=1;next} /^## \[/{f=0} f' "$T/repo/CHANGELOG.md" | grep -q 'Offline grammar mode' || fail "entries not moved under the release heading"
-  awk '/^## \[Unreleased\]/{f=1;next} /^## \[/{f=0} f' "$T/repo/CHANGELOG.md" | grep -q 'Offline grammar mode' && fail "entries still under Unreleased"
-  [ "$(git -C "$T/repo" log -1 --format=%s)" = "chore(release): v0.5.0" ] || fail "commit message"
-  [ "$(git -C "$T/repo" cat-file -t v0.5.0 2>/dev/null)" = "tag" ] || fail "v0.5.0 is not an annotated tag"
-  git_clean "$T/repo" || fail "tree dirty after release"
-  has 'git push origin main --follow-tags'
-  [ -z "$(git --git-dir="$T/remote.git" branch -a)" ] && [ -z "$(git --git-dir="$T/remote.git" tag)" ] || fail "release.sh pushed something"
-  QUILL_REPO_ROOT="$T/repo" run bash "$SCRIPTS/check-version.sh" v0.5.0; check_code 0
-  done_test
-}
-
-r05_release_bump_math_and_explicit_versions() {
-  new_test r05
-  make_repo "$T/a" 0.4.7
-  QUILL_REPO_ROOT="$T/a" run bash "$SCRIPTS/release.sh" patch; check_code 0
-  grep -q '^version = "0.4.8"' "$T/a/Cargo.toml" || fail "patch bump"
-  make_repo "$T/b" 0.4.7
-  QUILL_REPO_ROOT="$T/b" run bash "$SCRIPTS/release.sh" major; check_code 0
-  grep -q '^version = "1.0.0"' "$T/b/Cargo.toml" || fail "major bump"
-  make_repo "$T/c" 0.4.7
-  QUILL_REPO_ROOT="$T/c" run bash "$SCRIPTS/release.sh" 1.0.0-rc.1; check_code 0
-  grep -q '^version = "1.0.0-rc.1"' "$T/c/Cargo.toml" || fail "explicit prerelease"
-  [ "$(git -C "$T/c" cat-file -t v1.0.0-rc.1)" = "tag" ] || fail "prerelease tag"
-  make_repo "$T/d" 0.4.7
-  QUILL_REPO_ROOT="$T/d" run bash "$SCRIPTS/release.sh" 1.0;      check_nonzero
-  QUILL_REPO_ROOT="$T/d" run bash "$SCRIPTS/release.sh" bogus;    check_nonzero
-  QUILL_REPO_ROOT="$T/d" run bash "$SCRIPTS/release.sh" 0.4.7;    check_nonzero    # not greater than current
-  QUILL_REPO_ROOT="$T/d" run bash "$SCRIPTS/release.sh" 0.3.0;    check_nonzero    # lower than current
-  QUILL_REPO_ROOT="$T/d" run bash "$SCRIPTS/release.sh";          check_nonzero    # no argument
-  git_clean "$T/d" || fail "failed invocations modified the tree"
-  done_test
-}
-
-r06_release_refuses_unsafe_states() {
-  new_test r06
-  # dirty tree
-  make_repo "$T/dirty" 0.4.0; echo x >> "$T/dirty/README.md"
-  QUILL_REPO_ROOT="$T/dirty" run bash "$SCRIPTS/release.sh" patch; check_nonzero
-  grep -q '^version = "0.4.0"' "$T/dirty/Cargo.toml" || fail "dirty tree: Cargo.toml modified"
-  # not on main
-  make_repo "$T/feat" 0.4.0 feature-x
-  QUILL_REPO_ROOT="$T/feat" run bash "$SCRIPTS/release.sh" patch; check_nonzero; has 'main'
-  # tag already exists
-  make_repo "$T/dup" 0.4.0; git -C "$T/dup" tag v0.4.1
-  QUILL_REPO_ROOT="$T/dup" run bash "$SCRIPTS/release.sh" patch; check_nonzero
-  grep -q '^version = "0.4.0"' "$T/dup/Cargo.toml" || fail "dup tag: Cargo.toml modified"
-  # empty Unreleased section
-  make_repo "$T/empty" 0.4.0
-  python3 - "$T/empty/CHANGELOG.md" <<'PY'
-import re, sys
-p = sys.argv[1]; s = open(p).read()
-s = re.sub(r'(## \[Unreleased\]\n)(.*?)(\n## \[)', r'\1\n\3', s, count=1, flags=re.S)
-open(p, 'w').write(s)
-PY
-  git -C "$T/empty" commit -q -am "empty unreleased"
-  QUILL_REPO_ROOT="$T/empty" run bash "$SCRIPTS/release.sh" patch; check_nonzero; has 'unreleased'
-  [ -z "$(git -C "$T/empty" tag)" ] || fail "empty unreleased: tag created"
-  done_test
-}
-
 r07_scripts_are_syntactically_valid_and_executable_bash() {
   new_test r07
-  for s in check-version.sh package.sh release.sh changelog-section.sh; do
+  for s in check-version.sh package.sh changelog-section.sh; do
     bash -n "$SCRIPTS/$s" || fail "$s syntax"
     head -1 "$SCRIPTS/$s" | grep -q '^#!' || fail "$s shebang"
     [ -x "$SCRIPTS/$s" ] || fail "$s not executable"
@@ -238,10 +156,6 @@ r08_changelog_section_extraction() {
 
 r01_check_version
 r02_package_archives_and_checksums
-r03_release_dry_run_changes_nothing
-r04_release_minor_bumps_files_commits_and_tags_without_pushing
-r05_release_bump_math_and_explicit_versions
-r06_release_refuses_unsafe_states
 r07_scripts_are_syntactically_valid_and_executable_bash
 r08_changelog_section_extraction
 
