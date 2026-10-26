@@ -24,7 +24,7 @@ trap cleanup EXIT
 command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 required for the fake release server"; exit 0; }
 [ -f "$INSTALL_SH" ] || { echo "FAIL: $INSTALL_SH does not exist"; exit 1; }
 
-TOOLS="curl tar shasum sha256sum uname mktemp mv cp chmod mkdir rm cat sed awk grep head tail tr cut dirname basename id sh bash env sort date ls ln wc printf test find readlink getconf cmp tee touch stat ldconfig which expr uniq xargs od"
+TOOLS="curl tar gzip shasum sha256sum uname mktemp mv cp chmod mkdir rm cat sed awk grep head tail tr cut dirname basename id sh bash env sort date ls ln wc printf test find readlink getconf cmp tee touch stat ldconfig which expr uniq xargs od"
 
 # ---------- fixtures ----------
 REL="$ROOT/releases"        # served by the fake server: download/<tag>/<assets>, LATEST
