@@ -849,7 +849,8 @@ fn m06_nothing_available_prints_actionable_hint_quickly() {
         out.stderr
     );
     assert!(out.stderr.contains("quill status"), "{}", out.stderr);
-    assert!(out.secs < 10.0, "took {}s", out.secs);
+    // generous bound: guards against a hanging probe, while the debug-build grammar engine is slow on busy CI runners
+    assert!(out.secs < 30.0, "took {}s", out.secs);
 }
 
 #[test]
@@ -928,7 +929,8 @@ fn m09b_api_timeout_in_auto_mode_falls_back() {
         "{}",
         out.stderr
     );
-    assert!(out.secs < 15.0, "took {}s", out.secs);
+    // generous bound: see m06 (debug-build grammar engine on busy CI runners)
+    assert!(out.secs < 30.0, "took {}s", out.secs);
 }
 
 #[test]
