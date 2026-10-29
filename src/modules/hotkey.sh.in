@@ -72,7 +72,7 @@ trim_log() {
   size=$(wc -c < "$LOG" 2>/dev/null | tr -d ' ')
   [ -n "$size" ] && [ "$size" -gt 100000 ] || return 0
   TRIM=$(mktemp "$CONFDIR/.hotkey.XXXXXX") || { TRIM=; return 0; }
-  if tail -n 400 "$LOG" 2>/dev/null | tail -c 100000 > "$TRIM" 2>/dev/null && mv "$TRIM" "$LOG" 2>/dev/null; then
+  if tail -n 400 "$LOG" 2>/dev/null | tail -c 100000 > "$TRIM" 2>/dev/null && [ -s "$TRIM" ] && mv "$TRIM" "$LOG" 2>/dev/null; then
     TRIM=
   else
     rm -f "$TRIM"
