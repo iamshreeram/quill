@@ -170,14 +170,7 @@ jobs:
       - name: Smoke test binary (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          $bin = "target\${{ matrix.target }}\release\quill.exe"
-          $version = & $bin --version
-          if ($version -ne "quill $($env:VERSION)") { throw "unexpected version: $version" }
-          # The GUI-subsystem binary only writes stdout when redirected to a file.
-          "this is an test" | & $bin --stdin --mode offline > out.txt
-          $out = Get-Content out.txt -Raw
-          if ($out -notmatch "a test") { throw "offline smoke test output lacks 'a test'" }
+        run: ./scripts/smoke-windows.ps1 -Bin "target\${{ matrix.target }}\release\quill.exe" -Version $env:VERSION
       - name: Package
         shell: bash
         env:
