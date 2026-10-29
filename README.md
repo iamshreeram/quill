@@ -282,6 +282,14 @@ Offline mode is a conservative grammar and spelling fixer. It runs entirely on y
 - Spacing and capitalization of sentence starts.
 - Common spelling typos, for example `teh` to `the`.
 
+Offline mode also fixes more common confusions and irregular verbs:
+
+- More Harper rules are enabled, each restricted by rule name: `then` to `than` (after a comparative), `could of` to `could have`, `its` / `it's`, `they're` / `their` / `there`, `to` / `too` / `loose` / `lose`, `cant` to `can't`, and `the affect of` to `the effect of`.
+- Spelling uses a built-in list of the 10,000 most frequent English words to choose between candidate fixes. A one-letter insertion to a common word is preferred (`arive` to `arrive`, `adress` to `address`; for 4-letter words the result must be in the top 1000, as in `wich` to `which`). A doubled letter may be dropped (`programm` to `program`, `wonderfull` to `wonderful`). Plain letter substitutions and word endings (`wonderfully`) are never preferred.
+- A small table fixes regularised past forms and participles: `buyed` to `bought`, `eated` to `ate` (or `eaten` after `have`), `teached` to `taught`.
+- `your welcome to` becomes `you're welcome to`, and a sentence-final `their` after `over`, `is`, `go` and similar words becomes `there`.
+- These rules keep the same safety guards: protected spans, negative contractions and capitalization limits all still apply.
+
 ### How it works
 
 It uses `harper-core`, the same linting engine that powers `harper-wasm`, compiled into Quill as native Rust. There is no network access and no model: the same input always gives the same output. Up to three passes run, each re-checking the previous result. Only edits that pass the safety policy are applied.
@@ -292,9 +300,9 @@ Offline mode changes as little as possible:
 
 - It never edits URLs, email addresses, code (inline code, fenced code blocks, indented code), command flags, paths, identifiers, `::` or `->` expressions, or words that look like identifiers (for example `camelCase`, words with digits).
 - It never edits ALLCAPS words, mixed-case words, or capitalized words that are not in the dictionary (likely names).
-- Only a short list of mechanical Harper rules is enabled: spelling (restricted as described below), the `teh` to `the` typo, sentence-start capitalization and the pronoun `I`, `a` / `an`, repeated words, double spaces, comma spacing, and simple pronoun-verb agreement (`I has` to `I have`). Every other Harper rule is off, so Quill does not expand abbreviations (`imo`, `asap`), rewrite word choice, or change tense.
+- Only a fixed, named list of Harper rules is enabled: the mechanical ones (spelling, `teh` to `the`, sentence-start capitalization, the pronoun `I`, `a` / `an`, repeated words, double spaces, comma spacing, pronoun-verb agreement) plus the small set of confusion rules listed under "What it fixes". Every other Harper rule is off, so Quill does not expand abbreviations (`imo`, `asap`), rewrite other word choices, or change tense.
 - It never turns a negative contraction written without an apostrophe into another word or splits it: `wont` stays `wont` or becomes `won't`, never `want`; `werent` and `arent` get an apostrophe, never a space. No edit may remove a negation.
-- Spelling fixes are deliberately conservative, because a wrong "fix" is worse than a missed typo. A misspelled lowercase word is replaced only when (a) the fix is a rearrangement of the same letters (`teh` to `the`, `recieve` to `receive`), (b) the fix only adds an apostrophe (`dont` to `don't`), or (c) the word has at least seven letters, is one edit away from the fix, and keeps its first letter (`grammer` to `grammar`). Everything else is left alone, so technical words and slang (`sudo`, `nginx`, `docker`, `kubectl`, `thx`, `pls`, `tmrw`) stay as you typed them.
+- Spelling fixes are deliberately conservative, because a wrong "fix" is worse than a missed typo. A misspelled lowercase word is replaced only when (a) the fix is a rearrangement of the same letters (`teh` to `the`, `recieve` to `receive`), (b) the fix only adds an apostrophe (`dont` to `don't`), or (c) the word has at least seven letters, is one edit away from the fix, and keeps its first letter (`grammer` to `grammar`), or (d) a 4-6 letter word gains one letter to become a common word (see above), or (e) a word of seven or more letters drops one letter of a doubled pair to become a common word (see above). Everything else is left alone, so technical words and slang (`sudo`, `nginx`, `docker`, `kubectl`, `thx`, `pls`, `tmrw`) stay as you typed them.
 - Capitalization is only changed for the pronoun `i` (and `i'm`, `i'll`, `i've`, `i'd`) and for the first word of a sentence or paragraph. Words in the middle of a sentence are never capitalized, so `docker` and `yaml` stay lowercase.
 - It preserves line endings (LF and CRLF), tabs and indentation. Edits never touch line indentation or cross a line break.
 - It is a prose tool. Lines that are not prose can still get comma spacing or spelling fixes (for example the CSV header `name,age,city` becomes `name, age, city`, and strings inside JSON are checked). Use code fences for text that must stay exactly as typed.

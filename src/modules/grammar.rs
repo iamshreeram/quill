@@ -4,7 +4,9 @@
 //! Built on `harper-core` (native Rust linter). A conservative safety policy wraps the linter so
 //! that URLs, emails, code, flags, identifiers and unknown names are never rewritten.
 
+use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 use harper_core::linting::{Lint, LintGroup, LintKind, Suggestion};
 use harper_core::parsers::PlainEnglish;
@@ -113,7 +115,69 @@ const ALLOWED_RULES: &[&str] = &[
     "IAmAgreement",
     // "I does" -> "I do"
     "IDo",
+    // ---- DESIGN Rev 4 change 1: loosened by rule name (see ALLOWED_RULES_ANY_KIND) ----
+    // "could of" -> "could have" (WordChoice)
+    "ModalOf",
+    // "your welcome" -> "you're welcome" (WordChoice)
+    "PossessiveYour",
+    // "the affect of" -> "the effect of" (WordChoice)
+    "NounVerbConfusion",
+    // "to"/"too"/"two" confusions (WordChoice)
+    "ToTwoToo",
+    // "there own" -> "their own" (WordChoice)
+    "ThereOwn",
+    // "cant" -> "can't" (Enhancement)
+    "Cant",
+    // "then" -> "than" after comparatives (Miscellaneous, allowed kind)
+    "ThenThan",
+    // "its" -> "it's" and "it's" -> "its" (Punctuation / Agreement, allowed kinds)
+    "ItsContraction",
+    "ItsPossessive",
+    // "they're" / "their" / "there" confusions (Grammar, allowed kinds)
+    "TheyreConfusions",
+    "TheirToThere",
+    "TheirToTheyre",
+    "ThereToTheir",
+    "TheyreToTheir",
+    // "to lose" / "too loose" confusions (Spelling kind, allowed)
+    "ToLoseTooLoose",
+    // "has went" -> "has gone" participle fixes (Grammar, allowed kind)
+    "SimplePastToPastParticiple",
 ];
+
+/// Rules (subset of ALLOWED_RULES) whose lints may use a LintKind outside ALLOWED_KINDS.
+/// Their lints skip only the kind gate (b) in `lint_is_safe`; every other guard still applies.
+const ALLOWED_RULES_ANY_KIND: &[&str] = &[
+    "ModalOf",
+    "PossessiveYour",
+    "NounVerbConfusion",
+    "ToTwoToo",
+    "ThereOwn",
+    "Cant",
+];
+
+/// Word list: the 9894 most common English words, one per line (rank = line index), derived from
+/// google-10000-english (no-swears). See data/NOTICE.md for provenance and the licence caveat.
+const FREQ_10K: &str = include_str!("../../data/en_freq_10k.txt");
+
+/// Lazily built word -> rank map over `FREQ_10K`.
+fn freq_map() -> &'static HashMap<&'static str, usize> {
+    static MAP: OnceLock<HashMap<&'static str, usize>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        FREQ_10K
+            .lines()
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .enumerate()
+            .map(|(rank, w)| (w, rank))
+            .collect()
+    })
+}
+
+/// Frequency rank of `word` (0 = most common), or None when it is not in the list.
+fn freq_rank(word: &str) -> Option<usize> {
+    freq_map().get(word).copied()
+}
 
 const NEGATIVE_CONTRACTIONS: &[&str] = &[
     "cant", "dont", "wont", "isnt", "arent", "wasnt", "werent", "hasnt", "havent", "hadnt",
@@ -137,6 +201,10 @@ pub fn correct(input: &str, dialect: Dialect) -> Result<Correction, String> {
 
     // Built once per call; the dictionary is shared by Arc.
     let mut linter = LintGroup::new_curated(FstDictionary::curated(), dialect.into());
+    // The curated default leaves some allow-listed rules off; enable exactly the vetted list.
+    for rule in ALLOWED_RULES {
+        linter.config.set_rule_enabled(*rule, true);
+    }
     let mut text = input.to_string();
     let mut fixes = 0;
 
@@ -159,13 +227,26 @@ fn one_pass(chars: &[char], linter: &mut LintGroup) -> (Vec<char>, usize) {
     let prot = protected_ranges(chars);
     let doc = Document::new_curated(&text, &PlainEnglish);
     // Rule-name allowlist (DESIGN Rev 9): only vetted mechanical rule families run.
-    let mut lints: Vec<Lint> = linter
-        .organized_lints(&doc)
+    let mut harper: Vec<Lint> = Vec::new();
+    for (name, found) in linter.organized_lints(&doc) {
+        if !ALLOWED_RULES.contains(&name.as_str()) {
+            continue;
+        }
+        for mut lint in found {
+            if lint.lint_kind == LintKind::Spelling {
+                rank_spelling_suggestions(&mut lint, chars);
+            }
+            if lint_is_safe(&lint, chars, &prot, &name) {
+                harper.push(lint);
+            }
+        }
+    }
+    // Residual irregular-form table (DESIGN Rev 4 change 3); custom lints win over Harper.
+    let custom: Vec<Lint> = custom_lints(chars, &prot)
         .into_iter()
-        .filter(|(name, _)| ALLOWED_RULES.contains(&name.as_str()))
-        .flat_map(|(_, found)| found)
+        .filter(|l| lint_is_safe(l, chars, &prot, ""))
         .collect();
-    lints.retain(|l| lint_is_safe(l, chars, &prot));
+    let mut lints = merge_custom_over_harper(harper, custom);
     remove_overlaps(&mut lints);
     // Right-to-left so earlier offsets stay valid.
     lints.sort_by_key(|l| std::cmp::Reverse((l.span.start, l.span.end)));
@@ -227,9 +308,10 @@ fn lint_is_safe(
     lint: &harper_core::linting::Lint,
     chars: &[char],
     prot: &[(usize, usize)],
+    rule: &str,
 ) -> bool {
-    // (b) kind allowlist
-    if !ALLOWED_KINDS.contains(&lint.lint_kind) {
+    // (b) kind allowlist; skipped only for rules listed in ALLOWED_RULES_ANY_KIND.
+    if !ALLOWED_RULES_ANY_KIND.contains(&rule) && !ALLOWED_KINDS.contains(&lint.lint_kind) {
         return false;
     }
     // (d) must have a suggestion
@@ -256,12 +338,33 @@ fn lint_is_safe(
     if !no_word_split(&chars[s..e], &repl) || !negation_guard(&chars[s..e], &repl) {
         return false;
     }
-    // (c) spelling restriction
-    if lint.lint_kind == LintKind::Spelling && !spelling_ok(&chars[s..e], sugg) {
+    // (c) spelling restriction; ToLoseTooLoose's two-word "to loose" -> "to lose" is the one exception
+    if lint.lint_kind == LintKind::Spelling {
+        let to_lose = rule == "ToLoseTooLoose" && to_lose_fix(&chars[s..e], &repl);
+        if !to_lose && !spelling_ok(&chars[s..e], sugg) {
+            return false;
+        }
+    }
+    // NounVerbConfusion is restricted to affect -> effect (advise->advice is refused).
+    if rule == "NounVerbConfusion" && !affect_to_effect(&chars[s..e], &repl) {
         return false;
     }
     // (a) + (e)
     edit_ok(s, e, &repl, chars, prot)
+}
+
+/// True when the span is `to loose` and the replacement is `to lose` (ToLoseTooLoose).
+fn to_lose_fix(orig: &[char], repl: &[char]) -> bool {
+    let o: String = orig.iter().collect::<String>().to_lowercase();
+    let r: String = repl.iter().collect();
+    o == "to loose" && r == "to lose"
+}
+
+/// True when the span is `affect` and the replacement is `effect` (NounVerbConfusion).
+fn affect_to_effect(orig: &[char], repl: &[char]) -> bool {
+    let o: String = orig.iter().collect::<String>().to_lowercase();
+    let r: String = repl.iter().collect::<String>().to_lowercase();
+    o == "affect" && r == "effect"
 }
 
 /// (b') Capitalization edits (DESIGN Rev 8). Applied only when the edit merely upper-cases the
@@ -377,7 +480,344 @@ fn spelling_ok(token: &[char], sugg: &Suggestion) -> bool {
         && levenshtein(token, v) <= 1
         && v.len() >= token.len()
         && token.first() == v.first();
-    permutation || one_apostrophe || near_typo
+    permutation
+        || one_apostrophe
+        || near_typo
+        || frequency_typo(token, v)
+        || frequency_deletion(token, v)
+}
+
+/// (c, rule E) A long token with one doubled letter too many, fixed by deleting one of the pair
+/// (wonderfull->wonderful, usefull->useful, programm->program). Token len >= 7, the token is NOT in
+/// the top-10k list and the suggestion IS. Deletions of non-doubled letters are never allowed
+/// (journald, containerd, networkd stay untouched).
+fn frequency_deletion(token: &[char], v: &[char]) -> bool {
+    let token_s: String = token.iter().collect();
+    let sugg_s: String = v.iter().collect();
+    token.len() >= 7
+        && v.len() + 1 == token.len()
+        && token.first() == v.first()
+        && doubled_letter_deletion(token, v)
+        && freq_rank(&sugg_s).is_some()
+        && freq_rank(&token_s).is_none()
+}
+
+/// True when deleting one char of `token` yields `v` and that char is equal to a neighbour.
+fn doubled_letter_deletion(token: &[char], v: &[char]) -> bool {
+    (0..token.len()).any(|i| {
+        let doubled = (i > 0 && token[i - 1] == token[i])
+            || (i + 1 < token.len() && token[i + 1] == token[i]);
+        let mut rest = token.to_vec();
+        rest.remove(i);
+        doubled && rest == v
+    })
+}
+
+/// (c, rule D; DESIGN Rev 4 change 2) A short typo fixed by a common word. Requires: the token
+/// is NOT in the top-10k list; the suggestion IS; same first letter; Levenshtein distance 1.
+/// Token len 5..=6: suggestion len >= token len. Token len 4: only a single-letter insertion,
+/// and the suggestion must rank in the top 1000 (wich->which).
+fn frequency_typo(token: &[char], v: &[char]) -> bool {
+    let token_s: String = token.iter().collect();
+    let sugg_s: String = v.iter().collect();
+    if freq_rank(&token_s).is_some() {
+        return false;
+    }
+    let Some(rank) = freq_rank(&sugg_s) else {
+        return false;
+    };
+    if token.first() != v.first() || levenshtein(token, v) != 1 {
+        return false;
+    }
+    match token.len() {
+        4 => v.len() == 5 && rank < 1000,
+        5..=6 => v.len() == token.len() + 1,
+        _ => false,
+    }
+}
+
+/// Rank of a replacement candidate for ordering; candidates outside the list rank last.
+fn suggestion_rank(sugg: &Suggestion) -> usize {
+    match sugg {
+        Suggestion::ReplaceWith(v) => {
+            let s: String = v.iter().collect();
+            freq_rank(&s).unwrap_or(usize::MAX)
+        }
+        _ => usize::MAX,
+    }
+}
+
+/// A candidate may be promoted only when it is an insertion, a deletion or a letter permutation
+/// (never a plain substitution such as arive->alive), passes `spelling_ok`, and passes the
+/// word-split and negation guards, so promotion never picks an edit `lint_is_safe` would refuse.
+fn promotable_candidate(token: &[char], sugg: &Suggestion) -> bool {
+    let Suggestion::ReplaceWith(v) = sugg else {
+        return false;
+    };
+    (v.len() != token.len() || is_permutation(token, v))
+        && !(v.len() > token.len() && v.starts_with(token))
+        // An insertion or deletion is promoted only when the result is a common word (networkd
+        // must not become the uncommon networked). Permutations and apostrophes need no list.
+        && (is_permutation(token, v)
+            || is_one_apostrophe_insert(token, v)
+            || freq_rank(&v.iter().collect::<String>()).is_some())
+        && spelling_ok(token, sugg)
+        && no_word_split(token, v)
+        && negation_guard(token, v)
+}
+
+/// DESIGN Rev 4 change 2: among all suggestions of a Spelling lint that pass `spelling_ok`,
+/// move the most frequent one to the front. Other suggestions keep their relative order. When
+/// no suggestion passes, the lint is left unchanged (and later rejected by `lint_is_safe`).
+fn rank_spelling_suggestions(lint: &mut Lint, chars: &[char]) {
+    let (s, e) = (lint.span.start, lint.span.end);
+    if s > e || e > chars.len() {
+        return;
+    }
+    let token = &chars[s..e];
+    let best = lint
+        .suggestions
+        .iter()
+        .enumerate()
+        .filter(|(_, sugg)| promotable_candidate(token, sugg))
+        .min_by_key(|(_, sugg)| suggestion_rank(sugg))
+        .map(|(i, _)| i);
+    if let Some(i) = best.filter(|&i| i > 0) {
+        let chosen = lint.suggestions.remove(i);
+        lint.suggestions.insert(0, chosen);
+    }
+}
+
+/// Harper lints overlapping an accepted custom lint are dropped; custom lints are always kept
+/// (DESIGN Rev 3 precedence). Returns the surviving Harper lints followed by the custom lints.
+fn merge_custom_over_harper(harper: Vec<Lint>, custom: Vec<Lint>) -> Vec<Lint> {
+    let overlaps = |a: &Lint, b: &Lint| a.span.start < b.span.end && b.span.start < a.span.end;
+    let mut out: Vec<Lint> = harper
+        .into_iter()
+        .filter(|h| !custom.iter().any(|c| overlaps(h, c)))
+        .collect();
+    out.extend(custom);
+    out
+}
+
+/// Residual irregular-form table (DESIGN Rev 3/4 change 3). Entries: (non-word, past, participle).
+/// The participle is used after have/has/had/being/be/was/were/is/are/am and the unambiguous
+/// contracted forms i've, you've, ...; the past form otherwise. Entries whose past equals the
+/// participle are always applied. Never add real words here (singed, leaved are NOT entries).
+const IRREGULAR_TABLE: &[(&str, &str, &str)] = &[
+    ("buyed", "bought", "bought"),
+    ("teached", "taught", "taught"),
+    ("runned", "ran", "run"),
+    ("goed", "went", "gone"),
+    ("breaked", "broke", "broken"),
+    ("growed", "grew", "grown"),
+    ("knowed", "knew", "known"),
+    ("thinked", "thought", "thought"),
+    ("bringed", "brought", "brought"),
+    ("catched", "caught", "caught"),
+    ("falled", "fell", "fallen"),
+    ("feeled", "felt", "felt"),
+    ("gived", "gave", "given"),
+    ("taked", "took", "taken"),
+    ("writed", "wrote", "written"),
+    ("eated", "ate", "eaten"),
+    ("drinked", "drank", "drunk"),
+    ("swimmed", "swam", "swum"),
+    ("speaked", "spoke", "spoken"),
+    ("sleeped", "slept", "slept"),
+    ("standed", "stood", "stood"),
+    ("understanded", "understood", "understood"),
+    ("builded", "built", "built"),
+    ("sended", "sent", "sent"),
+    ("spended", "spent", "spent"),
+    ("maked", "made", "made"),
+    ("comed", "came", "come"),
+];
+
+/// Previous words (adjacent, lowercase, U+2019 normalised to ') that select the participle.
+const PARTICIPLE_PREV: &[&str] = &[
+    "have",
+    "has",
+    "had",
+    "having",
+    "been",
+    "be",
+    "being",
+    "was",
+    "were",
+    "is",
+    "are",
+    "am",
+    "i've",
+    "you've",
+    "we've",
+    "they've",
+    "who've",
+    "could've",
+    "would've",
+    "should've",
+    "might've",
+    "must've",
+];
+
+/// Word runs of alphabetic letters and apostrophes (leading/trailing apostrophes trimmed).
+fn word_runs(chars: &[char]) -> Vec<(usize, usize)> {
+    let is_word = |c: &char| c.is_alphabetic() || *c == '\'' || *c == '\u{2019}';
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if !is_word(&chars[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && is_word(&chars[i]) {
+            i += 1;
+        }
+        let mut s = start;
+        let mut e = i;
+        while s < e && matches!(chars[s], '\'' | '\u{2019}') {
+            s += 1;
+        }
+        while e > s && matches!(chars[e - 1], '\'' | '\u{2019}') {
+            e -= 1;
+        }
+        if s < e {
+            out.push((s, e));
+        }
+    }
+    out
+}
+
+/// Lowercase form of `chars[s..e]` with U+2019 normalised to an ASCII apostrophe.
+fn norm_word(chars: &[char], s: usize, e: usize) -> String {
+    chars[s..e]
+        .iter()
+        .map(|c| {
+            if *c == '\u{2019}' {
+                '\''
+            } else {
+                c.to_ascii_lowercase()
+            }
+        })
+        .collect()
+}
+
+/// Custom single-token Grammar lints from `IRREGULAR_TABLE`. Each span is exactly the token.
+/// Tokens overlapping a protected range are skipped (`lint_is_safe` re-checks every lint).
+fn custom_lints(chars: &[char], prot: &[(usize, usize)]) -> Vec<Lint> {
+    let runs = word_runs(chars);
+    let mut out = Vec::new();
+    for (k, &(s, e)) in runs.iter().enumerate() {
+        if prot.iter().any(|&(ps, pe)| s < pe && ps < e) {
+            continue;
+        }
+        let word = norm_word(chars, s, e);
+        let Some(&(_, past, participle)) = IRREGULAR_TABLE.iter().find(|(w, _, _)| *w == word)
+        else {
+            continue;
+        };
+        // The previous word counts only when separated from this one by whitespace alone.
+        let prev = k
+            .checked_sub(1)
+            .map(|p| runs[p])
+            .filter(|&(_, pe)| pe <= s && chars[pe..s].iter().all(|c| c.is_whitespace()));
+        let prev_word = prev.map(|(ps, pe)| norm_word(chars, ps, pe));
+        let replacement = if past == participle {
+            past
+        } else {
+            match prev_word.as_deref() {
+                Some(p) if PARTICIPLE_PREV.contains(&p) => participle,
+                Some(p) if p.ends_with("'s") || p.ends_with("'d") => continue,
+                _ => past,
+            }
+        };
+        // Never touch a word glued to a hyphen (compound such as eated-style).
+        if (s > 0 && chars[s - 1] == '-') || (e < chars.len() && chars[e] == '-') {
+            continue;
+        }
+        let mut repl: Vec<char> = replacement.chars().collect();
+        if chars[s].is_uppercase() {
+            repl[0] = repl[0].to_ascii_uppercase();
+        }
+        out.push(Lint {
+            span: Span::new(s, e),
+            lint_kind: LintKind::Grammar,
+            suggestions: vec![Suggestion::ReplaceWith(repl)],
+            message: format!("Use \"{replacement}\" instead of \"{word}\"."),
+            priority: 31,
+        });
+    }
+    out.extend(context_lints(chars, prot, &runs));
+    out
+}
+
+/// Words after which a sentence-final `their` means `there` (DESIGN Rev 5).
+const THERE_PREV: &[&str] = &[
+    "over", "out", "up", "down", "from", "at", "is", "are", "was", "were", "be", "been", "get",
+    "go", "went", "going",
+];
+
+/// True when runs `a` and `b` are separated by whitespace only (at least one character).
+fn whitespace_adjacent(chars: &[char], a: (usize, usize), b: (usize, usize)) -> bool {
+    a.1 < b.0 && chars[a.1..b.0].iter().all(|c| c.is_whitespace())
+}
+
+/// Context fixes (DESIGN Rev 5). `your welcome to` -> `you're welcome to` (only the token `your`;
+/// `Your welcome message` is untouched). `their` directly after a word in THERE_PREV and followed
+/// by end of text or one of `. ! ? ,` -> `there` (`over their.`). Same guards as the irregular
+/// table: whitespace-only adjacency, protected ranges, hyphen-glued words skipped.
+fn context_lints(chars: &[char], prot: &[(usize, usize)], runs: &[(usize, usize)]) -> Vec<Lint> {
+    let mut out = Vec::new();
+    for k in 0..runs.len() {
+        let (s, e) = runs[k];
+        if prot.iter().any(|&(ps, pe)| s < pe && ps < e) {
+            continue;
+        }
+        if (s > 0 && chars[s - 1] == '-') || (e < chars.len() && chars[e] == '-') {
+            continue;
+        }
+        let word = norm_word(chars, s, e);
+        let (replacement, applies) = match word.as_str() {
+            "your" => {
+                let applies = match (runs.get(k + 1).copied(), runs.get(k + 2).copied()) {
+                    (Some(w1), Some(w2)) => {
+                        norm_word(chars, w1.0, w1.1) == "welcome"
+                            && norm_word(chars, w2.0, w2.1) == "to"
+                            && whitespace_adjacent(chars, (s, e), w1)
+                            && whitespace_adjacent(chars, w1, w2)
+                    }
+                    _ => false,
+                };
+                ("you're", applies)
+            }
+            "their" => {
+                let prev_ok = k > 0 && {
+                    let p = runs[k - 1];
+                    whitespace_adjacent(chars, p, (s, e))
+                        && THERE_PREV.contains(&norm_word(chars, p.0, p.1).as_str())
+                };
+                let end_ok = e >= chars.len() || matches!(chars[e], '.' | '!' | '?' | ',');
+                ("there", prev_ok && end_ok)
+            }
+            _ => continue,
+        };
+        if !applies {
+            continue;
+        }
+        let mut repl: Vec<char> = replacement.chars().collect();
+        if chars[s].is_uppercase() {
+            repl[0] = repl[0].to_ascii_uppercase();
+        }
+        out.push(Lint {
+            span: Span::new(s, e),
+            lint_kind: LintKind::Grammar,
+            suggestions: vec![Suggestion::ReplaceWith(repl)],
+            message: format!("Use \"{replacement}\" instead of \"{word}\"."),
+            priority: 31,
+        });
+    }
+    out
 }
 
 /// True when `v` is `token` with exactly one apostrophe inserted (and `token` has none).
@@ -961,5 +1401,158 @@ mod tests {
         assert_eq!(Dialect::from_str("AUSTRALIAN"), Ok(Dialect::Australian));
         assert!(Dialect::from_str("nope").is_err());
         assert_eq!(Dialect::default(), Dialect::American);
+    }
+
+    // ---- loosened allow-list / frequency rerank / irregular table (lead-written spec, DESIGN Rev 4) ----
+
+    fn check_cases(cases: &[(&str, &str)]) {
+        let mut bad = Vec::new();
+        for (input, want) in cases {
+            let got = fix(input);
+            if got != *want {
+                bad.push(format!("{input:?} -> {got:?} (want {want:?})"));
+            }
+        }
+        assert!(bad.is_empty(), "\n{}", bad.join("\n"));
+    }
+
+    #[test]
+    fn loosened_harper_rules_fix_common_confusions() {
+        check_cases(&[
+            (
+                "This phone is cheaper then mine.",
+                "This phone is cheaper than mine.",
+            ),
+            ("We could of won the game.", "We could have won the game."),
+            ("Its a great idea.", "It's a great idea."),
+            (
+                "The company changed it's name.",
+                "The company changed its name.",
+            ),
+            (
+                "Your welcome to stay for dinner.",
+                "You're welcome to stay for dinner.",
+            ),
+            ("Put the boxes over their.", "Put the boxes over there."),
+            ("Their going to the park.", "They're going to the park."),
+            (
+                "The affect of caffeine is real.",
+                "The effect of caffeine is real.",
+            ),
+            (
+                "I don't want to loose my keys.",
+                "I don't want to lose my keys.",
+            ),
+            (
+                "We are going too the cinema.",
+                "We are going to the cinema.",
+            ),
+            ("She has went to the market.", "She has gone to the market."),
+            ("He cant come today.", "He can't come today."),
+        ]);
+    }
+
+    #[test]
+    fn frequency_ranked_spelling_picks_the_common_word() {
+        check_cases(&[
+            (
+                "We have an apointment tomorrow.",
+                "We have an appointment tomorrow.",
+            ),
+            ("I will arive soon.", "I will arrive soon."),
+            ("Tell me wich one you want.", "Tell me which one you want."),
+            ("What is your adress?", "What is your address?"),
+            ("It was a wonderfull day.", "It was a wonderful day."),
+            ("This is a usefull tool.", "This is a useful tool."),
+            ("We wrote a new programm.", "We wrote a new program."),
+        ]);
+    }
+
+    #[test]
+    fn irregular_table_is_context_aware() {
+        check_cases(&[
+            ("She buyed a car.", "She bought a car."),
+            ("He teached me chess.", "He taught me chess."),
+            ("They goed home.", "They went home."),
+            ("I eated lunch.", "I ate lunch."),
+            ("I have eated lunch.", "I have eaten lunch."),
+            ("She has teached us.", "She has taught us."),
+            ("I've eated lunch.", "I've eaten lunch."),
+            ("She's buyed a car.", "She's bought a car."),
+            ("We writed a report.", "We wrote a report."),
+            (
+                "They had writed it already.",
+                "They had written it already.",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn ambiguous_contracted_auxiliary_never_defaults_to_past() {
+        // unchanged is acceptable; a wrong past form is not
+        assert_ne!(fix("She's eated lunch."), "She's ate lunch.");
+        assert_ne!(fix("I'd eated lunch."), "I'd ate lunch.");
+    }
+
+    #[test]
+    fn loosened_rules_leave_correct_text_alone() {
+        let clean = [
+            "The drug will affect your sleep.",
+            "Their dog is near the lake.",
+            "The cat licked its paw.",
+            "It's been a busy month.",
+            "You're welcome to stay.",
+            "I will lose my keys.",
+            "We went to the market too.",
+            "The knight rode a horse.",
+            "Run `sudo apt install nginx` now.",
+            "Use docker and kubectl for this.",
+            "She sang a song.",
+            "He taught math.",
+            "We should have gone earlier.",
+            "Your welcome email was lovely.",
+            "Some advise caution.",
+            "May the good advise the king.",
+            "I have an appointment today.",
+            "Check https://example.com/its-a-trap for details.",
+            "The fire singed his hair.",
+            "He is truly wonderful.",
+            "She sang beautifully.",
+            "Look at the journald config.",
+            "Restart the kubelet, etcd and containerd.",
+            "Check logind and networkd status.",
+            "Enable firewalld and chronyd on boot.",
+            "Your welcome message was lovely.",
+            "Is that their house or yours?",
+            "They left their coats over there.",
+            "Their.",
+            "Tom ran home after the game.",
+        ];
+        let cases: Vec<(&str, &str)> = clean.iter().map(|c| (*c, *c)).collect();
+        check_cases(&cases);
+    }
+
+    #[test]
+    fn custom_lint_wins_over_overlapping_harper_lint() {
+        let mk = |s: usize, e: usize, kind: LintKind, rep: &str| Lint {
+            span: Span::new(s, e),
+            lint_kind: kind,
+            suggestions: vec![Suggestion::ReplaceWith(rep.chars().collect())],
+            message: String::new(),
+            priority: 0,
+        };
+        let harper = vec![
+            mk(2, 9, LintKind::Spelling, "teacher"), // overlaps the custom lint -> dropped
+            mk(20, 24, LintKind::Grammar, "XXXX"),   // disjoint -> survives
+        ];
+        let custom = vec![mk(2, 9, LintKind::Grammar, "taught")];
+        let merged = merge_custom_over_harper(harper, custom);
+        assert_eq!(merged.len(), 2, "{merged:?}");
+        assert!(merged.iter().any(|l| l.span == Span::new(2, 9)
+            && l.suggestions == vec![Suggestion::ReplaceWith("taught".chars().collect())]));
+        assert!(merged.iter().any(|l| l.span == Span::new(20, 24)));
+        assert!(!merged
+            .iter()
+            .any(|l| l.suggestions == vec![Suggestion::ReplaceWith("teacher".chars().collect())]));
     }
 }
