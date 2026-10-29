@@ -174,6 +174,13 @@ try {
             }
             $cmd = $cmd + 'Get-Content -Raw -LiteralPath ' + $sq + $repoInstall + $sq + ' | Invoke-Expression'
 
+            if ($shell -eq 'powershell') {
+                # A child started from pwsh inherits PowerShell 7's PSModulePath, which hides the built-in modules of
+                # Windows PowerShell 5.1 (Get-FileHash is "not recognized"). Start from the machine value, as a fresh
+                # powershell.exe session does for a real user.
+                $cmd = '$env:PSModulePath=[Environment]::GetEnvironmentVariable(' + $sq + 'PSModulePath' + $sq + ',' + $sq + 'Machine' + $sq + '); ' + $cmd
+            }
+
             $shellArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ('"' + $cmd + '"'))
             $run = Invoke-Native -FilePath $shell -ArgumentList $shellArgs -TimeoutSec 180
             if ($run.Code -ne 0) {
