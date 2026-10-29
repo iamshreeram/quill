@@ -326,6 +326,8 @@ i10_macos_dependency_and_setup_flow() {
   check_calls_has '^setup'
   check_calls_has '^skhd .*--start-service'
   check_out_has 'accessibility'
+  check_out_has 'automation'
+  check_out_has 'system events'
   # QUILL_NO_SETUP skips setup
   : > "$CALLS"
   run_install QUILL_VERSION=9.9.9 QUILL_NO_SETUP=1

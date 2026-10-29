@@ -701,6 +701,27 @@ fn fake_skhd(env: &Env) -> PathBuf {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn t17b_setup_prints_the_permission_checklist() {
+    let env = Env::new();
+    env.cfg("https://llm.example.test/v1/messages");
+    let _skhd = fake_skhd(&env);
+    let out = env.run(&["setup"], None, &[]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    for w in [
+        "Accessibility",
+        "Automation",
+        "System Events",
+        "skhd",
+        "Notifications",
+        "quill.log",
+        "No permission is needed",
+    ] {
+        assert!(out.stderr.contains(w), "missing {w:?} in:\n{}", out.stderr);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn t17_setup_uses_a_managed_skhd_block() {
     let env = Env::with_home_name("Test Home's dir");
     env.cfg("https://llm.example.test/v1/messages");

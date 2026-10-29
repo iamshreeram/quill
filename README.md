@@ -53,7 +53,7 @@ The installer does the following:
 4. Checks that the binary reports exactly the expected version, then installs it atomically to `~/.local/bin/quill` (or `QUILL_INSTALL_DIR`).
 5. Creates the config with `quill init` if `~/.config/quill/config.toml` does not exist. An existing config is left unchanged.
 6. Prints a PATH line if the install directory is not on your `PATH`. It never edits your shell rc files.
-7. On macOS: offers to install skhd with Homebrew (asks first, see `QUILL_YES`), runs `quill setup`, starts skhd, and reminds you to grant skhd Accessibility permission (System Settings > Privacy & Security > Accessibility).
+7. On macOS: offers to install skhd with Homebrew (asks first, see `QUILL_YES`), runs `quill setup`, starts skhd, and lists the macOS permissions you need to grant (Accessibility and Automation for skhd, optional Notifications; see [Permissions (macOS)](#permissions-macos)).
 8. On Linux: tells you to install a clipboard tool (`wl-clipboard` or `xclip`) if none is found, and reminds you to bind a desktop shortcut to `quill --now`. Quill does not set up a Linux hotkey.
 9. Runs `quill status` to show the mode and the provider that would be used.
 
@@ -464,9 +464,27 @@ Both files are local and private (see Privacy and security).
 
 To change the shortcut, edit `[shortcut] macos` in the config and run `quill setup` again. It only touches its own block.
 
-skhd must be installed and on your `PATH`. If it is not, `quill setup` prints install instructions and still writes its files. skhd needs Accessibility permission (System Settings > Privacy & Security > Accessibility) to send the copy keystroke.
+skhd must be installed and on your `PATH`. If it is not, `quill setup` prints install instructions and still writes its files. skhd needs Accessibility permission (System Settings > Privacy & Security > Accessibility) to receive the shortcut and to click Edit > Copy; see [Permissions (macOS)](#permissions-macos) for the full list.
 
 Failures are logged to `~/.config/quill/quill.log`.
+
+### Permissions (macOS)
+
+macOS asks for these permissions. Quill never grants them automatically.
+
+1. **Accessibility**: enable skhd in System Settings > Privacy & Security > Accessibility. skhd needs it to receive the shortcut and to click Edit > Copy in the frontmost app.
+2. **Automation**: the first time you press the shortcut, macOS asks whether skhd may control System Events. Click Allow. If you clicked Don't Allow, enable it in System Settings > Privacy & Security > Automation > skhd > System Events.
+3. **Notifications (optional)**: to see Quill's failure and permission banners, allow notifications for Script Editor in System Settings > Notifications (on recent macOS, Script Editor may only appear in that list after the first banner has been shown).
+
+No permission is needed for the clipboard, `~/.config/quill` or a local Ollama. AI mode needs outbound HTTPS to your configured API URL.
+
+**What you see when something is missing**: Quill shows a notification with the same text that is written to `~/.config/quill/quill.log`. Quill does not run in that case, so the clipboard is not rewritten with a stale value. Automation is the permission users most often miss. Re-enable it under Privacy & Security > Automation > skhd > System Events. As a last resort, `tccutil reset AppleEvents` resets the prompts for all apps, so macOS asks again.
+
+If skhd never reacts to the shortcut at all, also check Input Monitoring for skhd.
+
+Quill recognises the macOS error messages in English only. An unrecognised error stops with a generic message. Workaround: press Cmd+C yourself, then run `quill --now` in a terminal.
+
+After upgrading Quill, re-run `quill setup` to refresh `hotkey.sh`. The installer does this for you.
 
 ## Privacy and security
 
@@ -484,7 +502,7 @@ Failures are logged to `~/.config/quill/quill.log`.
 - **HTTP 401 (`API error: HTTP 401`)**: the key is wrong or is sent in the wrong way. Check `key` and `auth`. Run `quill check`.
 - **Timeout**: the endpoint is slow or unreachable. Raise `timeout_secs` (maximum 600) or check the URL. For Ollama, the timeout is at least 120 seconds; a cold model load can still be slow.
 - **Offline grammar mode although you expected AI**: run `quill status`. It shows the mode source, whether an API key was found, and the Ollama probe result (not reachable, no usable model, or the model is not pulled).
-- **Hotkey does nothing (macOS)**: confirm skhd has Accessibility permission and that it is running (`skhd --start-service`). Then check `~/.config/quill/quill.log`.
+- **Hotkey does nothing (macOS)**: check the permissions in [Permissions (macOS)](#permissions-macos), especially Automation for System Events. Confirm skhd is running (`skhd --start-service`). Then check `~/.config/quill/quill.log`.
 - **Config errors**: run `quill check`. It names the offending field (for example `api.url`, `auth`, `timeout_secs`, `general.mode` or `offline.dialect`) without printing secret values.
 - **Installer stops with "glibc >= 2.35 is required" or "libssl.so.3 not found"**: install a newer distribution runtime or OpenSSL 3, or build from source (see [Build from source](#build-from-source)).
 - **Installer stops with "checksum mismatch"**: nothing was installed and any existing binary is untouched. Download again; if it persists, do not force the install.

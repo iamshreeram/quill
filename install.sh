@@ -276,7 +276,10 @@ macos_steps() {
   fi
   if command -v skhd >/dev/null 2>&1; then
     skhd --start-service </dev/null >/dev/null 2>&1 || true
-    say "Grant skhd Accessibility permission: System Settings > Privacy & Security > Accessibility (enable skhd)."
+    say "Permissions needed (macOS asks; details are printed by 'quill setup' and in the README):"
+    say "  1. Accessibility: enable skhd in System Settings > Privacy & Security > Accessibility."
+    say "  2. Automation: click Allow when macOS asks whether skhd may control System Events (first shortcut press)."
+    say "  3. Notifications (optional): allow Script Editor in System Settings > Notifications to see Quill banners."
   fi
 }
 
