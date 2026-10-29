@@ -156,8 +156,8 @@ const ALLOWED_RULES_ANY_KIND: &[&str] = &[
     "Cant",
 ];
 
-/// Frequency list: the 9894 most common English words, one per line (rank = line index).
-/// Source: google-10000-english-no-swears (MIT). See the PR body for the licence note.
+/// Word list: the 9894 most common English words, one per line (rank = line index), derived from
+/// google-10000-english (no-swears). See data/NOTICE.md for provenance and the licence caveat.
 const FREQ_10K: &str = include_str!("../../data/en_freq_10k.txt");
 
 /// Lazily built word -> rank map over `FREQ_10K`.
@@ -487,17 +487,30 @@ fn spelling_ok(token: &[char], sugg: &Suggestion) -> bool {
         || frequency_deletion(token, v)
 }
 
-/// (c, rule E) A long token with one extra letter, fixed by deleting it (wonderfull->wonderful,
-/// usefull->useful). Token len >= 7, the token is NOT in the top-10k list and the suggestion IS.
+/// (c, rule E) A long token with one doubled letter too many, fixed by deleting one of the pair
+/// (wonderfull->wonderful, usefull->useful, programm->program). Token len >= 7, the token is NOT in
+/// the top-10k list and the suggestion IS. Deletions of non-doubled letters are never allowed
+/// (journald, containerd, networkd stay untouched).
 fn frequency_deletion(token: &[char], v: &[char]) -> bool {
     let token_s: String = token.iter().collect();
     let sugg_s: String = v.iter().collect();
     token.len() >= 7
         && v.len() + 1 == token.len()
         && token.first() == v.first()
-        && levenshtein(token, v) == 1
+        && doubled_letter_deletion(token, v)
         && freq_rank(&sugg_s).is_some()
         && freq_rank(&token_s).is_none()
+}
+
+/// True when deleting one char of `token` yields `v` and that char is equal to a neighbour.
+fn doubled_letter_deletion(token: &[char], v: &[char]) -> bool {
+    (0..token.len()).any(|i| {
+        let doubled = (i > 0 && token[i - 1] == token[i])
+            || (i + 1 < token.len() && token[i + 1] == token[i]);
+        let mut rest = token.to_vec();
+        rest.remove(i);
+        doubled && rest == v
+    })
 }
 
 /// (c, rule D; DESIGN Rev 4 change 2) A short typo fixed by a common word. Requires: the token
@@ -543,6 +556,11 @@ fn promotable_candidate(token: &[char], sugg: &Suggestion) -> bool {
     };
     (v.len() != token.len() || is_permutation(token, v))
         && !(v.len() > token.len() && v.starts_with(token))
+        // An insertion or deletion is promoted only when the result is a common word (networkd
+        // must not become the uncommon networked). Permutations and apostrophes need no list.
+        && (is_permutation(token, v)
+            || is_one_apostrophe_insert(token, v)
+            || freq_rank(&v.iter().collect::<String>()).is_some())
         && spelling_ok(token, sugg)
         && no_word_split(token, v)
         && negation_guard(token, v)
@@ -1446,6 +1464,7 @@ mod tests {
             ("What is your adress?", "What is your address?"),
             ("It was a wonderfull day.", "It was a wonderful day."),
             ("This is a usefull tool.", "This is a useful tool."),
+            ("We wrote a new programm.", "We wrote a new program."),
         ]);
     }
 
@@ -1499,6 +1518,10 @@ mod tests {
             "The fire singed his hair.",
             "He is truly wonderful.",
             "She sang beautifully.",
+            "Look at the journald config.",
+            "Restart the kubelet, etcd and containerd.",
+            "Check logind and networkd status.",
+            "Enable firewalld and chronyd on boot.",
             "Your welcome message was lovely.",
             "Is that their house or yours?",
             "They left their coats over there.",
