@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-29
+
+### Changed
+- test: spec for loosened allow-list, frequency-ranked spelling, irregular table (red)
+- feat(offline): enable vetted Harper rules by name, frequency-ranked spelling, irregular-verb table
+- fix(offline): restrict frequency deletion to doubled letters; require listed insertions; docs and data NOTICE
+- docs: add .ram-status design/status records
+
 ## [0.6.0] - 2026-10-26
 
 ### Added
