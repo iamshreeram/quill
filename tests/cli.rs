@@ -634,6 +634,58 @@ fn install_clipboard_fakes(env: &Env, clip_in: &str) -> PathBuf {
 }
 
 #[cfg(target_os = "macos")]
+fn install_counting_clipboard(env: &Env, empty_reads: u32, text: &str) -> (PathBuf, PathBuf) {
+    let cin = env.root.join("clip_in.txt");
+    let cout = env.root.join("clip_out.txt");
+    let count = env.root.join("pbpaste.count");
+    fs::write(&cin, text).unwrap();
+    env.install_fake(
+        "pbpaste",
+        &format!(
+            "#!/bin/sh\nn=$(/bin/cat '{c}' 2>/dev/null || echo 0)\nn=$((n+1))\necho $n > '{c}'\nif [ $n -le {e} ]; then exit 0; fi\n/bin/cat '{i}'\n",
+            c = count.display(),
+            e = empty_reads,
+            i = cin.display()
+        ),
+    );
+    env.install_fake(
+        "pbcopy",
+        &format!("#!/bin/sh\n/bin/cat > '{}'\n", cout.display()),
+    );
+    (cout, count)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn t15b_now_retries_an_empty_clipboard_read() {
+    let env = Env::new();
+    let (cout, count) = install_counting_clipboard(&env, 2, "We could of won.");
+    let out = env.run(&["--now", "--offline"], None, &[]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        fs::read_to_string(&cout).unwrap().contains("could have"),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(fs::read_to_string(&count).unwrap().trim(), "3");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn t15c_now_gives_up_on_a_permanently_empty_clipboard() {
+    let env = Env::new();
+    let (_cout, count) = install_counting_clipboard(&env, 100, "ignored");
+    let out = env.run(&["--now", "--offline"], None, &[]);
+    assert_eq!(out.code, 1, "{}", out.stderr);
+    assert!(
+        out.stderr.contains("clipboard is empty or has no text"),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(fs::read_to_string(&count).unwrap().trim(), "4");
+}
+
+#[cfg(target_os = "macos")]
 #[test]
 fn t15_now_uses_clipboard_and_writes_private_history() {
     let env = Env::new();
