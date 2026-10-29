@@ -1,6 +1,6 @@
 # CI: lint, build + test on Ubuntu/macOS/Windows, and shell-script checks.
-# Windows is experimental: its clipboard and hotkey code cannot be verified locally,
-# so only its smoke step is allowed to fail without failing the job.
+# Windows is experimental for the product, but its build, smoke test, package and installer
+# checks are BLOCKING in CI.
 name: CI
 
 on:
@@ -49,18 +49,22 @@ jobs:
         run: cargo build --locked
       - name: Test
         run: cargo test --locked
-      # Experimental: the Windows binary is GUI-subsystem, so its stdout only appears
-      # when redirected to a file. Cannot be verified locally; failures do not fail CI.
-      - name: Windows smoke test (experimental)
+      - name: Windows smoke test (GUI-subsystem binary)
         if: runner.os == 'Windows'
-        continue-on-error: true
         shell: pwsh
         run: |
-          & .\target\debug\quill.exe --version
-          "this is an test" | & .\target\debug\quill.exe --stdin --mode offline > smoke.txt
-          $out = Get-Content smoke.txt -Raw
-          Write-Host $out
-          if ($out -notmatch "a test") { throw "offline smoke test output lacks 'a test'" }
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          if (-not $ver) { throw 'could not read the version from Cargo.toml' }
+          "QUILL_VER=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          ./scripts/smoke-windows.ps1 -Bin ./target/debug/quill.exe -Version $ver
+      - name: Windows package (same script and shell as the release job)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: bash scripts/package.sh x86_64-pc-windows-msvc "$QUILL_VER" target/debug/quill.exe dist
+      - name: Windows package and install.ps1 checks
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/check-windows-install.ps1 -Dist ./dist -Version $env:QUILL_VER -Bin ./target/debug/quill.exe
 
   scripts:
     name: scripts (${{ matrix.os }})

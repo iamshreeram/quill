@@ -141,6 +141,81 @@ r07_scripts_are_syntactically_valid_and_executable_bash() {
   done_test
 }
 
+r09_windows_gui_binary_is_never_captured() {
+  new_test r09
+  local root="$HERE/.." f
+  for f in scripts/lib-native.ps1 scripts/smoke-windows.ps1 scripts/check-windows-install.ps1 install.ps1; do
+    [ -f "$root/$f" ] || fail "$f does not exist"
+  done
+  # the process helper must run natives through Start-Process with file redirection (quill.exe is a GUI-subsystem
+  # binary: PowerShell cannot capture its stdout from `$x = & exe`; that panicked every Windows release smoke test)
+  grep -q 'Start-Process' "$root/scripts/lib-native.ps1" 2>/dev/null || fail "lib-native.ps1 must use Start-Process"
+  grep -q 'RedirectStandardOutput' "$root/scripts/lib-native.ps1" 2>/dev/null || fail "lib-native.ps1 must redirect stdout to a file"
+  grep -q 'lib-native.ps1' "$root/scripts/smoke-windows.ps1" 2>/dev/null || fail "smoke-windows.ps1 must dot-source lib-native.ps1"
+  # no capture of a native program's output in any PowerShell script or workflow
+  for f in scripts/lib-native.ps1 scripts/smoke-windows.ps1 scripts/check-windows-install.ps1 install.ps1 \
+    .github/workflows/ci.yml .github/workflows/release.yml; do
+    [ -f "$root/$f" ] || continue
+    if grep -n -E '=[[:space:]]*\(?[[:space:]]*&[[:space:]]' "$root/$f" > "$OUT" 2>&1; then fail "$f captures native output with '= &' (use Invoke-Native)"; fi
+  done
+  : > "$OUT"
+  # install.ps1: latest tag is resolved with a non-following HttpClient, not the Invoke-WebRequest exception shape
+  grep -q 'AllowAutoRedirect' "$root/install.ps1" || fail "install.ps1 must resolve /latest with AllowAutoRedirect=false"
+  grep -q 'Headers.Location' "$root/install.ps1" || fail "install.ps1 must read Headers.Location"
+  grep -q "Headers\\['Location'\\]" "$root/install.ps1" && fail "install.ps1 still indexes Headers['Location']"
+  grep -qi 'UNTESTED ON WINDOWS' "$root/install.ps1" && fail "install.ps1 still claims to be untested on Windows"
+  # both workflows use the shared smoke script; CI must not be able to hide a Windows failure
+  grep -q 'scripts/smoke-windows.ps1' "$root/.github/workflows/release.yml" || fail "release.yml must call scripts/smoke-windows.ps1"
+  grep -q 'scripts/smoke-windows.ps1' "$root/.github/workflows/ci.yml" || fail "ci.yml must call scripts/smoke-windows.ps1"
+  grep -q 'check-windows-install.ps1' "$root/.github/workflows/ci.yml" || fail "ci.yml must run scripts/check-windows-install.ps1"
+  grep -q 'package.sh x86_64-pc-windows-msvc' "$root/.github/workflows/ci.yml" || fail "ci.yml must package the Windows archive with scripts/package.sh"
+  grep -q 'continue-on-error' "$root/.github/workflows/ci.yml" && fail "ci.yml must not use continue-on-error (it hid the Windows failure)"
+  # the experimental policy of the release job itself is unchanged
+  grep -q 'continue-on-error: ${{ matrix.experimental }}' "$root/.github/workflows/release.yml" || fail "release.yml lost its experimental-Windows policy"
+  done_test
+}
+
+r10_windows_fixture_server() {
+  new_test r10
+  local srv="$HERE/../scripts/windows-fixture-server.py" port pid
+  [ -f "$srv" ] || { fail "scripts/windows-fixture-server.py does not exist"; done_test; return; }
+  command -v python3 >/dev/null 2>&1 || { echo "skip r10: python3 missing"; done_test; return; }
+  mkdir -p "$T/root/download/v1.2.3"
+  printf 'hello' > "$T/root/download/v1.2.3/file.txt"
+  port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+  python3 "$srv" --root "$T/root" --port "$port" --version 1.2.3 > "$T/srv.out" 2> "$T/srv.err" &
+  pid=$!
+  python3 - "$port" > "$OUT" 2> "$ERR" <<'PY'
+import http.client, sys, time
+port = int(sys.argv[1])
+def get(path):
+    for _ in range(60):
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+            c.request("GET", path)
+            r = c.getresponse()
+            body = r.read()
+            hdr = dict(r.getheaders())
+            c.close()
+            return r.status, hdr, body
+        except OSError:
+            time.sleep(0.1)
+    raise SystemExit("server never became ready")
+s, h, b = get("/latest")
+assert s == 302 and h.get("Location") == "/tag/v1.2.3", (s, h)
+s, h, b = get("/download/v1.2.3/file.txt")
+assert s == 200 and b == b"hello", (s, b)
+s, h, b = get("/download/v1.2.3/missing.zip")
+assert s == 404, s
+print("ok")
+PY
+  CODE=$?
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  check_code 0
+  has "^ok"
+  done_test
+}
+
 r08_changelog_section_extraction() {
   new_test r08
   [ -f "$SCRIPTS/changelog-section.sh" ] || { fail "scripts/changelog-section.sh does not exist"; done_test; return; }
@@ -158,6 +233,8 @@ r01_check_version
 r02_package_archives_and_checksums
 r07_scripts_are_syntactically_valid_and_executable_bash
 r08_changelog_section_extraction
+r09_windows_gui_binary_is_never_captured
+r10_windows_fixture_server
 
 echo
 echo "passed: $PASS   failed: $FAILED"
