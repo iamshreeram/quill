@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-29
+
+### Changed
+- fix(windows): run quill.exe through Start-Process so the release smoke test, installer and CI can read its output
+- test(windows): start the Windows PowerShell 5.1 install check from a clean module path
+- test(windows): widen the capture guard ($x=&$exe, $(& ...), @(& ...)) and test the guard itself
+
 ## [0.8.0] - 2026-10-29
 
 ### Changed
