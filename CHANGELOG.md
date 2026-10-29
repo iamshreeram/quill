@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-29
+
+### Changed
+- feat(setup): list required macOS permissions and report a missing one instead of failing silently
+- fix(hotkey): one run at a time, clipboard retry, result banners and an appended log
+- fix(hotkey): compile and run the hotkey tests only on unix; sweep stale temp files; cap log bytes
+- fix(hotkey): never replace the log with an empty trimmed file
+
 ## [0.7.0] - 2026-10-29
 
 ### Changed
