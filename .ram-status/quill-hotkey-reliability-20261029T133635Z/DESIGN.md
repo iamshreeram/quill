@@ -1,3 +1,4 @@
+Revision 5: validator round 1 (FAIL major: tests did not compile on Linux/Windows - hotkey tests moved into `#[cfg(unix)] mod hotkey`; minors: stale temp sweep, byte cap on trim, flock error != EWOULDBLOCK degrades, README wording, copy-step fd-9 test)
 Revision 4: critic round 3 C7 accepted (keep fd 9 in the clipboard-mutating children; supersedes the B1 `9>&-` policy and the B4 SIGKILL/children tests) - AWAITING USER GO-AHEAD (critic round cap reached)
 Revision 3: critic round 2 (C1 guard recovery race => REPLACED the directory lock by a kernel flock via perl; C3 chmod failure is a hard preflight failure; C5 grep -F -x)
 Revision 2: critic round 1 (C1 guarded stale reclaim, C2 never reclaim a live owner by age, C3 log symlink/permission safety, C4 test harness, C5 anchored status lines, C6 write-retry seam)
@@ -87,3 +88,11 @@ C4 minor (test harness) -> RESOLVED (critic round 3)
 C5 minor (anchored status lines) -> RESOLVED (critic round 3)
 C6 minor (retry seam) -> RESOLVED (critic round 3)
 C7 major (fd 9 closed in clipboard-mutating children lets a surviving old quill overwrite the clipboard after a killed shell's lock is released) -> OPEN: fix accepted and specified in B5; critic round cap (3) reached, so no 4th critic verdict; the validator (Phase 6.5) must verify B5 explicitly
+
+# REVISION 5 (validator round 1)
+V1 major (FIXED): src/modules/setup.rs tests used `fs::` and `std::os::unix` without imports/gates, so CI on ubuntu and windows (and the Release verify job) failed on main after PR #2 (CI run 40883277842, Release 40883277720). Fix: the hotkey tests live in `#[cfg(unix)] mod hotkey { use super::super::*; use std::fs; ... }`. Evidence pending: GitHub CI on the PR branch (ubuntu lint+test, windows test, macos).
+V2 minor (test added, see note): hotkey_copy_step_keeps_the_lock_when_the_shell_is_killed. NOTE: on macOS /bin/sh (bash) the `$(...)` subshell itself keeps fd 9 for as long as the copy osascript runs, so closing fd 9 on osascript alone is an equivalent mutant there; on dash (Linux CI) the subshell execs directly and the test discriminates.
+V3 minor (FIXED): `find "$CONFDIR" -maxdepth 1 -type f -name '.hotkey.??????' -mmin +10 -exec rm -f {} +` while holding the lock (never in unlocked mode); test hotkey_sweeps_stale_temp_files_but_keeps_fresh_ones.
+V4 minor (FIXED): trim = `tail -n 400 log | tail -c 100000`; test hotkey_log_trim_also_caps_bytes.
+V5 minor (FIXED): perl exits 1 only for EWOULDBLOCK, 2 (=> unlocked mode) for any other flock error; test hotkey_lock_error_other_than_busy_is_not_treated_as_busy.
+V6 minor (FIXED): README wording (single run only while active) and the 'Quill: finished' banner documented.

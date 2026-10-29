@@ -24,7 +24,7 @@ if [ "$LOCKING" = 1 ] && ! ( : 9>>"$LOCKFILE" ) 2>/dev/null; then
 fi
 if [ "$LOCKING" = 1 ]; then
   exec 9>>"$LOCKFILE"
-  perl -e 'use Fcntl qw(:flock); open(my $fh, ">&=", 9) or exit 2; exit(flock($fh, LOCK_EX | LOCK_NB) ? 0 : 1)'
+  perl -e 'use Fcntl qw(:flock); open(my $fh, ">&=", 9) or exit 2; exit(flock($fh, LOCK_EX | LOCK_NB) ? 0 : ($!{EWOULDBLOCK} ? 1 : 2))'
   case $? in
     0) ;;
     1) exit 0 ;;
@@ -42,6 +42,10 @@ if [ -e "$LOG" ]; then
     notify "Quill: cannot restrict the permissions of $LOG. Fix them and try again."
     exit 1
   }
+fi
+if [ "$LOCKING" = 1 ]; then
+  # a run killed with SIGKILL cannot clean up; only the lock holder may sweep (never in unlocked mode)
+  find "$CONFDIR" -maxdepth 1 -type f -name '.hotkey.??????' -mmin +10 -exec rm -f {} + 2>/dev/null
 fi
 RUNLOG=$(mktemp "$CONFDIR/.hotkey.XXXXXX") || {
   notify "Quill: cannot create a temporary file in $CONFDIR."
@@ -68,7 +72,7 @@ trim_log() {
   size=$(wc -c < "$LOG" 2>/dev/null | tr -d ' ')
   [ -n "$size" ] && [ "$size" -gt 100000 ] || return 0
   TRIM=$(mktemp "$CONFDIR/.hotkey.XXXXXX") || { TRIM=; return 0; }
-  if tail -n 400 "$LOG" > "$TRIM" 2>/dev/null && mv "$TRIM" "$LOG" 2>/dev/null; then
+  if tail -n 400 "$LOG" 2>/dev/null | tail -c 100000 > "$TRIM" 2>/dev/null && mv "$TRIM" "$LOG" 2>/dev/null; then
     TRIM=
   else
     rm -f "$TRIM"

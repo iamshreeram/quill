@@ -412,28 +412,33 @@ mod tests {
         }
     }
 
-    // ---- hotkey.sh permission handling ----
-    // Spec: .ram-status/quill-permissions-20261029T074751Z/DESIGN.md (Revision 2/3).
-    //
-    // The generated script is executed under /bin/sh with a fake `osascript` and a fake
-    // quill binary; nothing touches the real clipboard, System Events or notifications.
-    // The sandbox directory name contains a space and an apostrophe on purpose.
+    #[cfg(unix)]
+    mod hotkey {
+        use super::super::*;
+        use std::fs;
 
-    use std::os::unix::fs::PermissionsExt as _;
-    use std::path::PathBuf;
-    use std::process::{Command, Stdio};
+        // ---- hotkey.sh permission handling ----
+        // Spec: .ram-status/quill-permissions-20261029T074751Z/DESIGN.md (Revision 2/3).
+        //
+        // The generated script is executed under /bin/sh with a fake `osascript` and a fake
+        // quill binary; nothing touches the real clipboard, System Events or notifications.
+        // The sandbox directory name contains a space and an apostrophe on purpose.
 
-    use std::os::unix::fs::symlink;
-    use std::path::Path;
-    use std::process::Child;
-    use std::sync::Mutex;
-    use std::time::{Duration, Instant};
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::path::PathBuf;
+        use std::process::{Command, Stdio};
 
-    // Serialises "write an executable" and "fork": a freshly written fake must never be
-    // exec'd while another test thread still holds a write fd open (ETXTBSY on Linux).
-    static SPAWN_LOCK: Mutex<()> = Mutex::new(());
+        use std::os::unix::fs::symlink;
+        use std::path::Path;
+        use std::process::Child;
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
 
-    const FAKE_OSASCRIPT: &str = r#"#!/bin/sh
+        // Serialises "write an executable" and "fork": a freshly written fake must never be
+        // exec'd while another test thread still holds a write fd open (ETXTBSY on Linux).
+        static SPAWN_LOCK: Mutex<()> = Mutex::new(());
+
+        const FAKE_OSASCRIPT: &str = r#"#!/bin/sh
 case "$*" in
 *"display notification"*)
   for a in "$@"; do printf '%s\n' "$a"; done >> "$NOTIFY_LOG"
@@ -443,11 +448,16 @@ case "$*" in
   fi
   exit 0;;
 esac
+if [ -n "$FAKE_OSA_BLOCK" ]; then
+  : > "$OSA_STARTED"
+  i=0
+  while [ ! -e "$QUILL_RELEASE" ] && [ "$i" -lt 400 ]; do sleep 0.05; i=$((i+1)); done
+fi
 printf '%s' "$FAKE_OSA_OUT"
 exit 0
 "#;
 
-    const FAKE_QUILL: &str = r#"#!/bin/sh
+        const FAKE_QUILL: &str = r#"#!/bin/sh
 echo called >> "$QUILL_REC"
 if [ -n "$FAKE_QUILL_ERR" ]; then printf '%s\n' "$FAKE_QUILL_ERR" >&2; fi
 if [ -n "$FAKE_QUILL_BLOCK" ]; then
@@ -459,854 +469,941 @@ if [ -n "$FAKE_QUILL_SLEEP" ]; then sleep "$FAKE_QUILL_SLEEP"; fi
 exit "${FAKE_QUILL_RC:-0}"
 "#;
 
-    struct Sandbox {
-        root: PathBuf,
-    }
-
-    struct Outcome {
-        code: i32,
-        quill_calls: usize,
-        notify: String,
-        log: String,
-    }
-
-    impl Outcome {
-        fn banners(&self) -> usize {
-            self.notify.lines().filter(|l| *l == "---").count()
+        struct Sandbox {
+            root: PathBuf,
         }
-    }
 
-    #[derive(Clone)]
-    struct Opts {
-        osa_out: String,
-        quill_rc: i32,
-        quill_err: String,
-        block: bool,
-        sleep: Option<String>,
-        notify_bg: bool,
-        path: Option<String>,
-    }
+        struct Outcome {
+            code: i32,
+            quill_calls: usize,
+            notify: String,
+            log: String,
+        }
 
-    impl Opts {
-        fn new(osa_out: &str, quill_rc: i32) -> Opts {
-            Opts {
-                osa_out: osa_out.to_string(),
-                quill_rc,
-                quill_err: "[quill] processing 5 chars...\n[quill] done".to_string(),
-                block: false,
-                sleep: None,
-                notify_bg: false,
-                path: None,
+        impl Outcome {
+            fn banners(&self) -> usize {
+                self.notify.lines().filter(|l| *l == "---").count()
             }
         }
-        fn err(mut self, e: &str) -> Opts {
-            self.quill_err = e.to_string();
-            self
-        }
-        fn block(mut self) -> Opts {
-            self.block = true;
-            self
-        }
-        fn sleep(mut self, s: &str) -> Opts {
-            self.sleep = Some(s.to_string());
-            self
-        }
-        fn notify_bg(mut self) -> Opts {
-            self.notify_bg = true;
-            self
-        }
-        fn path(mut self, p: String) -> Opts {
-            self.path = Some(p);
-            self
-        }
-    }
 
-    impl Sandbox {
-        fn new() -> Sandbox {
-            // unique per test: pid + monotonic counter (clock ticks alone can collide across threads)
-            static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-            let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let root =
-                std::env::temp_dir().join(format!("quill hk's dir {}-{seq}", std::process::id()));
-            let _ = fs::remove_dir_all(&root);
-            fs::create_dir_all(root.join("bin")).unwrap();
-            let sb = Sandbox { root };
-            {
-                let _g = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-                sb.write_exec("bin/osascript", FAKE_OSASCRIPT);
-                sb.write_exec("fake quill", FAKE_QUILL);
-                let script = render_hotkey_script(
-                    &sb.p("fake quill").display().to_string(),
-                    &sb.p("quill.log").display().to_string(),
-                );
-                fs::write(sb.p("hotkey.sh"), script).unwrap();
-            }
-            sb
+        #[derive(Clone)]
+        struct Opts {
+            osa_out: String,
+            quill_rc: i32,
+            quill_err: String,
+            block: bool,
+            sleep: Option<String>,
+            notify_bg: bool,
+            osa_block: bool,
+            path: Option<String>,
         }
 
-        fn p(&self, rel: &str) -> PathBuf {
-            self.root.join(rel)
-        }
-
-        fn write_exec(&self, rel: &str, body: &str) -> PathBuf {
-            let p = self.p(rel);
-            fs::write(&p, body).unwrap();
-            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
-            p
-        }
-
-        /// Adds (or replaces) a fake tool in the sandbox bin dir that shadows the real one.
-        fn add_tool(&self, name: &str, body: &str) {
-            let _g = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            self.write_exec(&format!("bin/{name}"), body);
-        }
-
-        fn command(&self, o: &Opts, barrier: Option<&Path>) -> Command {
-            let script = self.p("hotkey.sh");
-            let mut c = Command::new("/bin/sh");
-            match barrier {
-                None => {
-                    c.arg(&script);
+        impl Opts {
+            fn new(osa_out: &str, quill_rc: i32) -> Opts {
+                Opts {
+                    osa_out: osa_out.to_string(),
+                    quill_rc,
+                    quill_err: "[quill] processing 5 chars...\n[quill] done".to_string(),
+                    block: false,
+                    sleep: None,
+                    notify_bg: false,
+                    osa_block: false,
+                    path: None,
                 }
-                Some(_) => {
-                    // start barrier: wait (bounded, 10 s) for the GO file, then run the script
-                    c.arg("-c").arg(
+            }
+            fn err(mut self, e: &str) -> Opts {
+                self.quill_err = e.to_string();
+                self
+            }
+            fn block(mut self) -> Opts {
+                self.block = true;
+                self
+            }
+            fn sleep(mut self, s: &str) -> Opts {
+                self.sleep = Some(s.to_string());
+                self
+            }
+            fn notify_bg(mut self) -> Opts {
+                self.notify_bg = true;
+                self
+            }
+            fn osa_block(mut self) -> Opts {
+                self.osa_block = true;
+                self
+            }
+            fn path(mut self, p: String) -> Opts {
+                self.path = Some(p);
+                self
+            }
+        }
+
+        impl Sandbox {
+            fn new() -> Sandbox {
+                // unique per test: pid + monotonic counter (clock ticks alone can collide across threads)
+                static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let root = std::env::temp_dir()
+                    .join(format!("quill hk's dir {}-{seq}", std::process::id()));
+                let _ = fs::remove_dir_all(&root);
+                fs::create_dir_all(root.join("bin")).unwrap();
+                let sb = Sandbox { root };
+                {
+                    let _g = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                    sb.write_exec("bin/osascript", FAKE_OSASCRIPT);
+                    sb.write_exec("fake quill", FAKE_QUILL);
+                    let script = render_hotkey_script(
+                        &sb.p("fake quill").display().to_string(),
+                        &sb.p("quill.log").display().to_string(),
+                    );
+                    fs::write(sb.p("hotkey.sh"), script).unwrap();
+                }
+                sb
+            }
+
+            fn p(&self, rel: &str) -> PathBuf {
+                self.root.join(rel)
+            }
+
+            fn write_exec(&self, rel: &str, body: &str) -> PathBuf {
+                let p = self.p(rel);
+                fs::write(&p, body).unwrap();
+                fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+                p
+            }
+
+            /// Adds (or replaces) a fake tool in the sandbox bin dir that shadows the real one.
+            fn add_tool(&self, name: &str, body: &str) {
+                let _g = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                self.write_exec(&format!("bin/{name}"), body);
+            }
+
+            fn command(&self, o: &Opts, barrier: Option<&Path>) -> Command {
+                let script = self.p("hotkey.sh");
+                let mut c = Command::new("/bin/sh");
+                match barrier {
+                    None => {
+                        c.arg(&script);
+                    }
+                    Some(_) => {
+                        // start barrier: wait (bounded, 10 s) for the GO file, then run the script
+                        c.arg("-c").arg(
                         r#"i=0; while [ ! -e "$GO" ] && [ "$i" -lt 1000 ]; do sleep 0.01; i=$((i+1)); done; exec /bin/sh "$HK""#,
                     );
-                }
-            }
-            let default_path = format!("{}:/usr/bin:/bin", self.p("bin").display());
-            // env_clear() first: everything below is set on the cleared environment
-            c.env_clear()
-                .env("PATH", o.path.clone().unwrap_or(default_path))
-                .env("HOME", &self.root)
-                .env("NOTIFY_LOG", self.p("notify.log"))
-                .env("QUILL_REC", self.p("quill.rec"))
-                .env("QUILL_STARTED", self.p("quill.started"))
-                .env("QUILL_RELEASE", self.p("quill.release"))
-                .env("FAKE_OSA_OUT", &o.osa_out)
-                .env("FAKE_QUILL_RC", o.quill_rc.to_string())
-                .env("FAKE_QUILL_ERR", &o.quill_err)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            if let Some(go) = barrier {
-                c.env("GO", go).env("HK", &script);
-            }
-            if o.block {
-                c.env("FAKE_QUILL_BLOCK", "1");
-            }
-            if let Some(s) = &o.sleep {
-                c.env("FAKE_QUILL_SLEEP", s);
-            }
-            if o.notify_bg {
-                c.env("FAKE_NOTIFY_BG", "1");
-            }
-            c
-        }
-
-        fn spawn(&self, o: &Opts) -> Child {
-            let mut c = self.command(o, None);
-            let _g = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            c.spawn().unwrap()
-        }
-
-        fn spawn_barrier(&self, o: &Opts, go: &Path) -> Child {
-            let mut c = self.command(o, Some(go));
-            let _g = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            c.spawn().unwrap()
-        }
-
-        fn outcome(&self, code: i32) -> Outcome {
-            Outcome {
-                code,
-                quill_calls: fs::read_to_string(self.p("quill.rec"))
-                    .map(|s| s.lines().count())
-                    .unwrap_or(0),
-                notify: fs::read_to_string(self.p("notify.log")).unwrap_or_default(),
-                log: fs::read_to_string(self.p("quill.log")).unwrap_or_default(),
-            }
-        }
-
-        /// Runs the script to completion. Records accumulate across sequential runs in one
-        /// sandbox (use a fresh Sandbox, or `reset()`, for independent counts).
-        fn run_opts(&self, o: &Opts) -> Outcome {
-            let status = self.spawn(o).wait().unwrap();
-            self.outcome(status.code().unwrap_or(-1))
-        }
-
-        fn run(&self, osa_out: &str, quill_rc: i32) -> Outcome {
-            self.run_opts(&Opts::new(osa_out, quill_rc))
-        }
-
-        fn wait_for(&self, rel: &str) {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while !self.p(rel).exists() {
-                assert!(Instant::now() < deadline, "timed out waiting for {rel}");
-                std::thread::sleep(Duration::from_millis(20));
-            }
-        }
-
-        fn release(&self) {
-            fs::write(self.p("quill.release"), "").unwrap();
-        }
-
-        /// A PATH that has the fakes and the shell utilities the script needs, but no perl.
-        fn path_without_perl(&self) -> String {
-            let dir = self.p("nobin");
-            fs::create_dir_all(&dir).unwrap();
-            for tool in [
-                "dirname", "mktemp", "chmod", "rm", "date", "cat", "grep", "sed", "tail", "cut",
-                "wc", "tr", "mv", "sleep", "head",
-            ] {
-                for base in ["/usr/bin", "/bin"] {
-                    let src = format!("{base}/{tool}");
-                    if Path::new(&src).exists() {
-                        let _ = symlink(&src, dir.join(tool));
-                        break;
                     }
                 }
+                let default_path = format!("{}:/usr/bin:/bin", self.p("bin").display());
+                // env_clear() first: everything below is set on the cleared environment
+                c.env_clear()
+                    .env("PATH", o.path.clone().unwrap_or(default_path))
+                    .env("HOME", &self.root)
+                    .env("NOTIFY_LOG", self.p("notify.log"))
+                    .env("QUILL_REC", self.p("quill.rec"))
+                    .env("QUILL_STARTED", self.p("quill.started"))
+                    .env("QUILL_RELEASE", self.p("quill.release"))
+                    .env("OSA_STARTED", self.p("osa.started"))
+                    .env("FAKE_OSA_OUT", &o.osa_out)
+                    .env("FAKE_QUILL_RC", o.quill_rc.to_string())
+                    .env("FAKE_QUILL_ERR", &o.quill_err)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                if let Some(go) = barrier {
+                    c.env("GO", go).env("HK", &script);
+                }
+                if o.block {
+                    c.env("FAKE_QUILL_BLOCK", "1");
+                }
+                if o.osa_block {
+                    c.env("FAKE_OSA_BLOCK", "1");
+                }
+                if let Some(s) = &o.sleep {
+                    c.env("FAKE_QUILL_SLEEP", s);
+                }
+                if o.notify_bg {
+                    c.env("FAKE_NOTIFY_BG", "1");
+                }
+                c
             }
-            let _ = symlink(self.p("bin/osascript"), dir.join("osascript"));
-            dir.display().to_string()
+
+            fn spawn(&self, o: &Opts) -> Child {
+                let mut c = self.command(o, None);
+                let _g = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                c.spawn().unwrap()
+            }
+
+            fn spawn_barrier(&self, o: &Opts, go: &Path) -> Child {
+                let mut c = self.command(o, Some(go));
+                let _g = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                c.spawn().unwrap()
+            }
+
+            fn outcome(&self, code: i32) -> Outcome {
+                Outcome {
+                    code,
+                    quill_calls: fs::read_to_string(self.p("quill.rec"))
+                        .map(|s| s.lines().count())
+                        .unwrap_or(0),
+                    notify: fs::read_to_string(self.p("notify.log")).unwrap_or_default(),
+                    log: fs::read_to_string(self.p("quill.log")).unwrap_or_default(),
+                }
+            }
+
+            /// Runs the script to completion. Records accumulate across sequential runs in one
+            /// sandbox (use a fresh Sandbox, or `reset()`, for independent counts).
+            fn run_opts(&self, o: &Opts) -> Outcome {
+                let status = self.spawn(o).wait().unwrap();
+                self.outcome(status.code().unwrap_or(-1))
+            }
+
+            fn run(&self, osa_out: &str, quill_rc: i32) -> Outcome {
+                self.run_opts(&Opts::new(osa_out, quill_rc))
+            }
+
+            fn wait_for(&self, rel: &str) {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !self.p(rel).exists() {
+                    assert!(Instant::now() < deadline, "timed out waiting for {rel}");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+
+            fn release(&self) {
+                fs::write(self.p("quill.release"), "").unwrap();
+            }
+
+            /// A PATH that has the fakes and the shell utilities the script needs, but no perl.
+            fn path_without_perl(&self) -> String {
+                let dir = self.p("nobin");
+                fs::create_dir_all(&dir).unwrap();
+                for tool in [
+                    "dirname", "mktemp", "chmod", "rm", "date", "cat", "grep", "sed", "tail",
+                    "cut", "wc", "tr", "mv", "sleep", "head",
+                ] {
+                    for base in ["/usr/bin", "/bin"] {
+                        let src = format!("{base}/{tool}");
+                        if Path::new(&src).exists() {
+                            let _ = symlink(&src, dir.join(tool));
+                            break;
+                        }
+                    }
+                }
+                let _ = symlink(self.p("bin/osascript"), dir.join("osascript"));
+                dir.display().to_string()
+            }
         }
-    }
 
-    impl Drop for Sandbox {
-        fn drop(&mut self) {
-            let _ = fs::write(self.root.join("quill.release"), "");
-            let _ = fs::remove_dir_all(&self.root);
+        impl Drop for Sandbox {
+            fn drop(&mut self) {
+                let _ = fs::write(self.root.join("quill.release"), "");
+                let _ = fs::remove_dir_all(&self.root);
+            }
         }
-    }
 
-    fn signal(pid: u32, sig: &str) {
-        let st = Command::new("kill")
-            .arg(format!("-{sig}"))
-            .arg(pid.to_string())
-            .status()
-            .unwrap();
-        assert!(st.success(), "kill -{sig} {pid} failed");
-    }
-
-    /// "YYYY-MM-DD HH:MM:SS run pid=<n> rc=<n>"
-    fn is_header(line: &str) -> bool {
-        let b = line.as_bytes();
-        if b.len() < 30 || !line.is_ascii() {
-            return false;
+        fn signal(pid: u32, sig: &str) {
+            let st = Command::new("kill")
+                .arg(format!("-{sig}"))
+                .arg(pid.to_string())
+                .status()
+                .unwrap();
+            assert!(st.success(), "kill -{sig} {pid} failed");
         }
-        let digits = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18]
-            .iter()
-            .all(|&i| b[i].is_ascii_digit());
-        digits
-            && b[4] == b'-'
-            && b[7] == b'-'
-            && b[10] == b' '
-            && b[13] == b':'
-            && b[16] == b':'
-            && line[19..].starts_with(" run pid=")
-            && line.contains(" rc=")
-    }
 
-    fn headers(log: &str) -> usize {
-        log.lines().filter(|l| is_header(l)).count()
-    }
-
-    fn mode_of(p: &Path) -> u32 {
-        fs::metadata(p).unwrap().permissions().mode() & 0o777
-    }
-
-    fn is_root() -> bool {
-        Command::new("id")
-            .arg("-u")
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
-            .unwrap_or(false)
-    }
-
-    fn assert_stopped(o: &Outcome, words: &[&str], why: &str) {
-        assert_eq!(o.quill_calls, 0, "{why}: quill must NOT run");
-        assert_ne!(o.code, 0, "{why}: script must exit non-zero");
-        for w in words {
-            assert!(
-                o.notify.contains(w),
-                "{why}: notification lacks {w:?}: {}",
-                o.notify
-            );
-            assert!(o.log.contains(w), "{why}: log lacks {w:?}: {}", o.log);
+        /// "YYYY-MM-DD HH:MM:SS run pid=<n> rc=<n>"
+        fn is_header(line: &str) -> bool {
+            let b = line.as_bytes();
+            if b.len() < 30 || !line.is_ascii() {
+                return false;
+            }
+            let digits = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18]
+                .iter()
+                .all(|&i| b[i].is_ascii_digit());
+            digits
+                && b[4] == b'-'
+                && b[7] == b'-'
+                && b[10] == b' '
+                && b[13] == b':'
+                && b[16] == b':'
+                && line[19..].starts_with(" run pid=")
+                && line.contains(" rc=")
         }
-    }
 
-    #[test]
-    fn hotkey_copy_ok_runs_quill_once_and_shows_the_success_banner() {
-        let sb = Sandbox::new();
-        let o = sb.run("ok", 0);
-        assert_eq!(o.code, 0);
-        assert_eq!(o.quill_calls, 1);
-        assert!(o.notify.contains("paste with Cmd+V"), "{}", o.notify);
-    }
+        fn headers(log: &str) -> usize {
+            log.lines().filter(|l| is_header(l)).count()
+        }
 
-    #[test]
-    fn hotkey_accessibility_denied_25211_stops_with_message() {
-        let sb = Sandbox::new();
-        let o = sb.run(
+        fn mode_of(p: &Path) -> u32 {
+            fs::metadata(p).unwrap().permissions().mode() & 0o777
+        }
+
+        fn is_root() -> bool {
+            Command::new("id")
+                .arg("-u")
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+                .unwrap_or(false)
+        }
+
+        fn assert_stopped(o: &Outcome, words: &[&str], why: &str) {
+            assert_eq!(o.quill_calls, 0, "{why}: quill must NOT run");
+            assert_ne!(o.code, 0, "{why}: script must exit non-zero");
+            for w in words {
+                assert!(
+                    o.notify.contains(w),
+                    "{why}: notification lacks {w:?}: {}",
+                    o.notify
+                );
+                assert!(o.log.contains(w), "{why}: log lacks {w:?}: {}", o.log);
+            }
+        }
+
+        #[test]
+        fn hotkey_copy_ok_runs_quill_once_and_shows_the_success_banner() {
+            let sb = Sandbox::new();
+            let o = sb.run("ok", 0);
+            assert_eq!(o.code, 0);
+            assert_eq!(o.quill_calls, 1);
+            assert!(o.notify.contains("paste with Cmd+V"), "{}", o.notify);
+        }
+
+        #[test]
+        fn hotkey_accessibility_denied_25211_stops_with_message() {
+            let sb = Sandbox::new();
+            let o = sb.run(
             "ERR -25211: System Events got an error: osascript is not allowed assistive access.",
             0,
         );
-        assert_stopped(&o, &["Accessibility", "skhd"], "-25211");
-    }
+            assert_stopped(&o, &["Accessibility", "skhd"], "-25211");
+        }
 
-    #[test]
-    fn hotkey_accessibility_denied_1719_assistive_stops_with_message() {
-        let sb = Sandbox::new();
-        let o = sb.run(
-            "ERR -1719: System Events got an error: osascript is not allowed assistive access.",
-            0,
-        );
-        assert_stopped(&o, &["Accessibility", "skhd"], "-1719 assistive");
-    }
+        #[test]
+        fn hotkey_accessibility_denied_1719_assistive_stops_with_message() {
+            let sb = Sandbox::new();
+            let o = sb.run(
+                "ERR -1719: System Events got an error: osascript is not allowed assistive access.",
+                0,
+            );
+            assert_stopped(&o, &["Accessibility", "skhd"], "-1719 assistive");
+        }
 
-    #[test]
-    fn hotkey_automation_denied_1743_stops_with_message() {
-        let sb = Sandbox::new();
-        let o = sb.run(
-            "ERR -1743: Not authorized to send Apple events to System Events.",
-            0,
-        );
-        assert_stopped(&o, &["Automation", "System Events", "skhd"], "-1743");
-    }
+        #[test]
+        fn hotkey_automation_denied_1743_stops_with_message() {
+            let sb = Sandbox::new();
+            let o = sb.run(
+                "ERR -1743: Not authorized to send Apple events to System Events.",
+                0,
+            );
+            assert_stopped(&o, &["Automation", "System Events", "skhd"], "-1743");
+        }
 
-    #[test]
-    fn hotkey_automation_wins_when_both_patterns_appear() {
-        let sb = Sandbox::new();
-        let o = sb.run("ERR -1743: Not authorized ... assistive access (-25211)", 0);
-        assert_stopped(&o, &["Automation"], "both patterns");
-    }
+        #[test]
+        fn hotkey_automation_wins_when_both_patterns_appear() {
+            let sb = Sandbox::new();
+            let o = sb.run("ERR -1743: Not authorized ... assistive access (-25211)", 0);
+            assert_stopped(&o, &["Automation"], "both patterns");
+        }
 
-    #[test]
-    fn hotkey_unrecognised_1719_stops_with_generic_message() {
-        // A localised Accessibility denial has the same number but no English words.
-        let sb = Sandbox::new();
-        let o = sb.run(
+        #[test]
+        fn hotkey_unrecognised_1719_stops_with_generic_message() {
+            // A localised Accessibility denial has the same number but no English words.
+            let sb = Sandbox::new();
+            let o = sb.run(
             "ERR -1719: System Events hat einen Fehler festgestellt: osascript darf nicht auf Hilfsgeraete zugreifen.",
             0,
         );
-        assert_stopped(
-            &o,
-            &["-1719", "Accessibility", "Automation"],
-            "localised -1719",
-        );
-    }
+            assert_stopped(
+                &o,
+                &["-1719", "Accessibility", "Automation"],
+                "localised -1719",
+            );
+        }
 
-    #[test]
-    fn hotkey_benign_menu_failures_still_run_quill() {
-        for out in [
-            r#"ERR -1719: System Events got an error: Can't get menu "Edit" of menu bar 1. Invalid index."#,
-            "ERR -1719: Invalid index.",
-            "ERR -1719: Can't get menu item Copy",
-            r#"ERR -1728: Can't get menu item "Copy" of menu "Edit""#,
-            "ERR -9999: something unexpected",
-            "",
-        ] {
+        #[test]
+        fn hotkey_benign_menu_failures_still_run_quill() {
+            for out in [
+                r#"ERR -1719: System Events got an error: Can't get menu "Edit" of menu bar 1. Invalid index."#,
+                "ERR -1719: Invalid index.",
+                "ERR -1719: Can't get menu item Copy",
+                r#"ERR -1728: Can't get menu item "Copy" of menu "Edit""#,
+                "ERR -9999: something unexpected",
+                "",
+            ] {
+                let sb = Sandbox::new();
+                let o = sb.run(out, 0);
+                assert_eq!(o.quill_calls, 1, "{out:?} must continue to quill");
+                assert_eq!(o.code, 0, "{out:?}");
+                assert!(
+                    !o.notify.contains("Accessibility") && !o.notify.contains("Automation"),
+                    "{out:?}: {}",
+                    o.notify
+                );
+            }
+        }
+
+        #[test]
+        fn hotkey_quill_failure_still_notifies_with_log_pointer() {
             let sb = Sandbox::new();
-            let o = sb.run(out, 0);
-            assert_eq!(o.quill_calls, 1, "{out:?} must continue to quill");
-            assert_eq!(o.code, 0, "{out:?}");
+            let o = sb.run("ok", 1);
+            assert_eq!(o.quill_calls, 1);
+            assert!(o.notify.contains("Quill failed"), "{}", o.notify);
+            assert!(o.notify.contains("quill.log"), "{}", o.notify);
+        }
+
+        #[test]
+        fn hotkey_notification_text_is_passed_as_the_last_argv_item() {
+            let sb = Sandbox::new();
+            let o = sb.run(
+                "ERR -1743: Not authorized to send Apple events to System Events.",
+                0,
+            );
+            let lines: Vec<&str> = o.notify.lines().collect();
+            assert!(lines.len() >= 4, "{lines:?}");
+            assert_eq!(lines[lines.len() - 1], "---", "{lines:?}");
+            assert_eq!(lines[lines.len() - 3], "--", "{lines:?}");
+            assert!(lines[lines.len() - 2].contains("Automation"), "{lines:?}");
+            // the message is data, never spliced into an AppleScript -e line
+            for l in &lines[..lines.len() - 2] {
+                assert!(
+                    !l.contains("Automation"),
+                    "message leaked into script source: {l}"
+                );
+            }
+        }
+
+        #[test]
+        fn hotkey_script_is_valid_sh_with_private_umask_and_awkward_paths() {
+            let sb = Sandbox::new();
+            let _ = sb.run("ok", 0);
+            let script = sb.root.join("hotkey.sh");
+            let ok = Command::new("/bin/sh")
+                .arg("-n")
+                .arg(&script)
+                .status()
+                .unwrap();
+            assert!(ok.success());
+            let text = fs::read_to_string(&script).unwrap();
+            assert!(text.starts_with("#!/bin/sh\n"), "{text}");
+            assert!(text.contains("umask 077"), "{text}");
+            assert!(text.contains("quill.log"), "{text}");
+        }
+
+        #[test]
+        fn hotkey_messages_are_shell_safe_and_name_the_fix() {
+            for m in [MSG_ACCESSIBILITY, MSG_AUTOMATION, MSG_COPY_FAILED] {
+                assert!(
+                    !m.chars().any(|c| "'\"\\$`".contains(c)),
+                    "unsafe character in {m:?}"
+                );
+                assert!(m.contains("skhd") && m.contains("System Settings"), "{m}");
+            }
+            assert!(MSG_ACCESSIBILITY.contains("Accessibility"));
             assert!(
-                !o.notify.contains("Accessibility") && !o.notify.contains("Automation"),
-                "{out:?}: {}",
+                MSG_AUTOMATION.contains("Automation") && MSG_AUTOMATION.contains("System Events")
+            );
+            assert!(
+                MSG_COPY_FAILED.contains("-1719")
+                    && MSG_COPY_FAILED.contains("Accessibility")
+                    && MSG_COPY_FAILED.contains("Automation")
+            );
+        }
+
+        /// Compile-only check (never executed) that the AppleScript embedded in hotkey.sh is
+        /// valid; a syntax error would otherwise be hidden by the script's stderr handling.
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn hotkey_applescript_sources_compile_with_osacompile() {
+            let sb = Sandbox::new();
+            for (name, lines) in [("notify", NOTIFY_APPLESCRIPT), ("copy", COPY_APPLESCRIPT)] {
+                let mut cmd = Command::new("/usr/bin/osacompile");
+                cmd.arg("-o").arg(sb.root.join(format!("{name}.scpt")));
+                for l in lines {
+                    cmd.arg("-e").arg(l);
+                }
+                match cmd.output() {
+                    Ok(out) => assert!(
+                        out.status.success(),
+                        "{name} AppleScript failed to compile: {}",
+                        String::from_utf8_lossy(&out.stderr)
+                    ),
+                    Err(e) => eprintln!("osacompile unavailable ({e}); skipping {name}"),
+                }
+            }
+        }
+
+        // ---- reliability: banners, appended log, single instance (spec: DESIGN Rev 4) ----
+
+        #[test]
+        fn hotkey_success_shows_paste_banner_and_logs_a_header() {
+            let sb = Sandbox::new();
+            let o = sb.run("ok", 0);
+            assert_eq!(o.code, 0);
+            assert_eq!(o.banners(), 1, "{}", o.notify);
+            assert!(
+                o.notify.contains("result is on the clipboard") && o.notify.contains("Cmd+V"),
+                "{}",
                 o.notify
             );
+            assert_eq!(headers(&o.log), 1, "{}", o.log);
+            assert!(o.log.lines().any(|l| is_header(l) && l.ends_with(" rc=0")));
+            assert!(o.log.contains("[quill] done"), "{}", o.log);
         }
-    }
 
-    #[test]
-    fn hotkey_quill_failure_still_notifies_with_log_pointer() {
-        let sb = Sandbox::new();
-        let o = sb.run("ok", 1);
-        assert_eq!(o.quill_calls, 1);
-        assert!(o.notify.contains("Quill failed"), "{}", o.notify);
-        assert!(o.notify.contains("quill.log"), "{}", o.notify);
-    }
-
-    #[test]
-    fn hotkey_notification_text_is_passed_as_the_last_argv_item() {
-        let sb = Sandbox::new();
-        let o = sb.run(
-            "ERR -1743: Not authorized to send Apple events to System Events.",
-            0,
-        );
-        let lines: Vec<&str> = o.notify.lines().collect();
-        assert!(lines.len() >= 4, "{lines:?}");
-        assert_eq!(lines[lines.len() - 1], "---", "{lines:?}");
-        assert_eq!(lines[lines.len() - 3], "--", "{lines:?}");
-        assert!(lines[lines.len() - 2].contains("Automation"), "{lines:?}");
-        // the message is data, never spliced into an AppleScript -e line
-        for l in &lines[..lines.len() - 2] {
-            assert!(
-                !l.contains("Automation"),
-                "message leaked into script source: {l}"
-            );
-        }
-    }
-
-    #[test]
-    fn hotkey_script_is_valid_sh_with_private_umask_and_awkward_paths() {
-        let sb = Sandbox::new();
-        let _ = sb.run("ok", 0);
-        let script = sb.root.join("hotkey.sh");
-        let ok = Command::new("/bin/sh")
-            .arg("-n")
-            .arg(&script)
-            .status()
-            .unwrap();
-        assert!(ok.success());
-        let text = fs::read_to_string(&script).unwrap();
-        assert!(text.starts_with("#!/bin/sh\n"), "{text}");
-        assert!(text.contains("umask 077"), "{text}");
-        assert!(text.contains("quill.log"), "{text}");
-    }
-
-    #[test]
-    fn hotkey_messages_are_shell_safe_and_name_the_fix() {
-        for m in [MSG_ACCESSIBILITY, MSG_AUTOMATION, MSG_COPY_FAILED] {
-            assert!(
-                !m.chars().any(|c| "'\"\\$`".contains(c)),
-                "unsafe character in {m:?}"
-            );
-            assert!(m.contains("skhd") && m.contains("System Settings"), "{m}");
-        }
-        assert!(MSG_ACCESSIBILITY.contains("Accessibility"));
-        assert!(MSG_AUTOMATION.contains("Automation") && MSG_AUTOMATION.contains("System Events"));
-        assert!(
-            MSG_COPY_FAILED.contains("-1719")
-                && MSG_COPY_FAILED.contains("Accessibility")
-                && MSG_COPY_FAILED.contains("Automation")
-        );
-    }
-
-    /// Compile-only check (never executed) that the AppleScript embedded in hotkey.sh is
-    /// valid; a syntax error would otherwise be hidden by the script's stderr handling.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn hotkey_applescript_sources_compile_with_osacompile() {
-        let sb = Sandbox::new();
-        for (name, lines) in [("notify", NOTIFY_APPLESCRIPT), ("copy", COPY_APPLESCRIPT)] {
-            let mut cmd = Command::new("/usr/bin/osacompile");
-            cmd.arg("-o").arg(sb.root.join(format!("{name}.scpt")));
-            for l in lines {
-                cmd.arg("-e").arg(l);
-            }
-            match cmd.output() {
-                Ok(out) => assert!(
-                    out.status.success(),
-                    "{name} AppleScript failed to compile: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                ),
-                Err(e) => eprintln!("osacompile unavailable ({e}); skipping {name}"),
-            }
-        }
-    }
-
-    // ---- reliability: banners, appended log, single instance (spec: DESIGN Rev 4) ----
-
-    #[test]
-    fn hotkey_success_shows_paste_banner_and_logs_a_header() {
-        let sb = Sandbox::new();
-        let o = sb.run("ok", 0);
-        assert_eq!(o.code, 0);
-        assert_eq!(o.banners(), 1, "{}", o.notify);
-        assert!(
-            o.notify.contains("result is on the clipboard") && o.notify.contains("Cmd+V"),
-            "{}",
+        fn banner_for(err: &str, rc: i32) -> String {
+            let sb = Sandbox::new();
+            let o = sb.run_opts(&Opts::new("ok", rc).err(err));
+            assert_eq!(o.banners(), 1, "{}", o.notify);
             o.notify
-        );
-        assert_eq!(headers(&o.log), 1, "{}", o.log);
-        assert!(o.log.lines().any(|l| is_header(l) && l.ends_with(" rc=0")));
-        assert!(o.log.contains("[quill] done"), "{}", o.log);
-    }
+        }
 
-    fn banner_for(err: &str, rc: i32) -> String {
-        let sb = Sandbox::new();
-        let o = sb.run_opts(&Opts::new("ok", rc).err(err));
-        assert_eq!(o.banners(), 1, "{}", o.notify);
-        o.notify
-    }
-
-    #[test]
-    fn hotkey_fallback_banner_names_the_reason() {
-        let n = banner_for(
+        #[test]
+        fn hotkey_fallback_banner_names_the_reason() {
+            let n = banner_for(
             "[quill] processing 5 chars...\n[quill] AI request failed (API error: HTTP 401 (authentication failed)); falling back to offline grammar mode.\n[quill] done (offline grammar mode)",
             0,
         );
-        assert!(
-            n.contains("AI failed (API error: HTTP 401 (authentication failed))"),
-            "{n}"
-        );
-        assert!(
-            n.contains("used offline grammar fixes") && n.contains("Cmd+V"),
-            "{n}"
-        );
-    }
+            assert!(
+                n.contains("AI failed (API error: HTTP 401 (authentication failed))"),
+                "{n}"
+            );
+            assert!(
+                n.contains("used offline grammar fixes") && n.contains("Cmd+V"),
+                "{n}"
+            );
+        }
 
-    #[test]
-    fn hotkey_fallback_with_nothing_to_fix_says_so() {
-        let n = banner_for(
+        #[test]
+        fn hotkey_fallback_with_nothing_to_fix_says_so() {
+            let n = banner_for(
             "[quill] AI request failed (timeout); falling back to offline grammar mode.\n[quill] no changes",
             0,
         );
-        assert!(
-            n.contains("AI failed (timeout)") && n.contains("found nothing to fix"),
-            "{n}"
-        );
-        assert!(!n.contains("Cmd+V"), "{n}");
-    }
+            assert!(
+                n.contains("AI failed (timeout)") && n.contains("found nothing to fix"),
+                "{n}"
+            );
+            assert!(!n.contains("Cmd+V"), "{n}");
+        }
 
-    #[test]
-    fn hotkey_offline_only_and_no_change_banners() {
-        let n = banner_for("[quill] done (offline grammar mode)", 0);
-        assert!(
-            n.contains("offline grammar fixes applied") && n.contains("Cmd+V"),
-            "{n}"
-        );
-        let n = banner_for("[quill] no changes", 0);
-        assert!(
-            n.contains("no changes found") && !n.contains("Cmd+V"),
-            "{n}"
-        );
-    }
+        #[test]
+        fn hotkey_offline_only_and_no_change_banners() {
+            let n = banner_for("[quill] done (offline grammar mode)", 0);
+            assert!(
+                n.contains("offline grammar fixes applied") && n.contains("Cmd+V"),
+                "{n}"
+            );
+            let n = banner_for("[quill] no changes", 0);
+            assert!(
+                n.contains("no changes found") && !n.contains("Cmd+V"),
+                "{n}"
+            );
+        }
 
-    #[test]
-    fn hotkey_failure_banner_shows_the_last_stderr_line() {
-        let n = banner_for(
-            "[quill] processing 5 chars...\n[quill] clipboard is empty or has no text",
-            1,
-        );
-        assert!(
-            n.contains("Quill failed: clipboard is empty or has no text. See"),
-            "{n}"
-        );
-        assert!(n.contains("quill.log"), "{n}");
-        let n = banner_for("", 3);
-        assert!(n.contains("Quill failed (exit 3)"), "{n}");
-    }
+        #[test]
+        fn hotkey_failure_banner_shows_the_last_stderr_line() {
+            let n = banner_for(
+                "[quill] processing 5 chars...\n[quill] clipboard is empty or has no text",
+                1,
+            );
+            assert!(
+                n.contains("Quill failed: clipboard is empty or has no text. See"),
+                "{n}"
+            );
+            assert!(n.contains("quill.log"), "{n}");
+            let n = banner_for("", 3);
+            assert!(n.contains("Quill failed (exit 3)"), "{n}");
+        }
 
-    #[test]
-    fn hotkey_unknown_output_gets_a_generic_banner() {
-        let n = banner_for("something odd", 0);
-        assert!(n.contains("Quill: finished"), "{n}");
-    }
+        #[test]
+        fn hotkey_unknown_output_gets_a_generic_banner() {
+            let n = banner_for("something odd", 0);
+            assert!(n.contains("Quill: finished"), "{n}");
+        }
 
-    #[test]
-    fn hotkey_status_lines_are_matched_exactly_not_as_substrings() {
-        // a diagnostic that merely contains the words must not decide the banner
-        let n = banner_for(
+        #[test]
+        fn hotkey_status_lines_are_matched_exactly_not_as_substrings() {
+            // a diagnostic that merely contains the words must not decide the banner
+            let n = banner_for(
             "[quill] AI request failed (no changes yet); falling back to offline grammar mode.\n[quill] done (offline grammar mode)",
             0,
         );
-        assert!(n.contains("used offline grammar fixes"), "{n}");
-        assert!(!n.contains("found nothing"), "{n}");
-        for err in [
-            "q done\n[quill] done.",
-            "  [quill] done",
-            "[quill] done!",
-            "[quill] donex",
-        ] {
-            let n = banner_for(err, 0);
-            assert!(n.contains("Quill: finished"), "{err:?} => {n}");
+            assert!(n.contains("used offline grammar fixes"), "{n}");
+            assert!(!n.contains("found nothing"), "{n}");
+            for err in [
+                "q done\n[quill] done.",
+                "  [quill] done",
+                "[quill] done!",
+                "[quill] donex",
+            ] {
+                let n = banner_for(err, 0);
+                assert!(n.contains("Quill: finished"), "{err:?} => {n}");
+            }
         }
-    }
 
-    #[test]
-    fn hotkey_banner_text_is_data_not_code_and_is_bounded() {
-        let sb = Sandbox::new();
-        let nasty = "[quill] it said \"no\" and 'maybe' $(touch pwned) `touch pwned` ; rm -rf /";
-        let o = sb.run_opts(&Opts::new("ok", 1).err(nasty));
-        assert!(o.notify.contains("$(touch pwned)"), "{}", o.notify);
-        assert!(!Path::new("pwned").exists() && !sb.p("pwned").exists());
-        let long = format!("[quill] {}", "x".repeat(400));
-        let sb = Sandbox::new();
-        let o = sb.run_opts(&Opts::new("ok", 1).err(&long));
-        let lines: Vec<&str> = o.notify.lines().collect();
-        let msg = lines[lines.len() - 2];
-        assert!(msg.len() < 260, "banner not bounded: {} chars", msg.len());
-        assert!(msg.ends_with("quill.log"), "{msg}");
-    }
-
-    #[test]
-    fn hotkey_log_is_appended_across_runs() {
-        let sb = Sandbox::new();
-        let _ = sb.run("ok", 0);
-        let o = sb.run_opts(&Opts::new("ok", 0).err("[quill] no changes"));
-        assert_eq!(headers(&o.log), 2, "{}", o.log);
-        assert!(o.log.contains("[quill] done") && o.log.contains("[quill] no changes"));
-    }
-
-    #[test]
-    fn hotkey_log_is_trimmed_and_stays_private() {
-        let sb = Sandbox::new();
-        let mut old = String::new();
-        for i in 0..3000 {
-            old.push_str(&format!("old line {i:05} padding padding padding\n"));
-        }
-        assert!(old.len() > 100_000);
-        fs::write(sb.p("quill.log"), &old).unwrap();
-        let o = sb.run("ok", 0);
-        let n = o.log.lines().count();
-        assert!((300..=400).contains(&n), "{n} lines left");
-        assert!(
-            o.log.contains("[quill] done"),
-            "new block must survive the trim"
-        );
-        assert!(
-            !o.log.contains("old line 00000"),
-            "oldest lines must be gone"
-        );
-        assert_eq!(mode_of(&sb.p("quill.log")), 0o600);
-    }
-
-    #[test]
-    fn hotkey_existing_log_is_made_private() {
-        let sb = Sandbox::new();
-        fs::write(sb.p("quill.log"), "old\n").unwrap();
-        fs::set_permissions(sb.p("quill.log"), fs::Permissions::from_mode(0o644)).unwrap();
-        let o = sb.run("ok", 0);
-        assert_eq!(mode_of(&sb.p("quill.log")), 0o600);
-        assert!(
-            o.log.starts_with("old\n") && headers(&o.log) == 1,
-            "{}",
-            o.log
-        );
-    }
-
-    #[test]
-    fn hotkey_symlinked_or_non_regular_log_is_refused() {
-        let sb = Sandbox::new();
-        let victim = sb.p("victim.txt");
-        fs::write(&victim, "VICTIM").unwrap();
-        symlink(&victim, sb.p("quill.log")).unwrap();
-        let o = sb.run("ok", 0);
-        assert_ne!(o.code, 0);
-        assert_eq!(o.quill_calls, 0, "quill must not run");
-        assert_eq!(o.banners(), 1, "{}", o.notify);
-        assert!(o.notify.contains("log file"), "{}", o.notify);
-        assert_eq!(fs::read_to_string(&victim).unwrap(), "VICTIM");
-
-        let sb = Sandbox::new();
-        fs::create_dir(sb.p("quill.log")).unwrap();
-        let o = sb.run("ok", 0);
-        assert_ne!(o.code, 0);
-        assert_eq!(o.quill_calls, 0);
-        assert_eq!(o.banners(), 1, "{}", o.notify);
-        assert!(o.notify.contains("not a regular file"), "{}", o.notify);
-    }
-
-    #[test]
-    fn hotkey_failing_chmod_stops_before_copying() {
-        let sb = Sandbox::new();
-        sb.add_tool("chmod", "#!/bin/sh\nexit 1\n");
-        fs::write(sb.p("quill.log"), "old\n").unwrap();
-        let o = sb.run("ok", 0);
-        assert_ne!(o.code, 0);
-        assert_eq!(o.quill_calls, 0);
-        assert_eq!(o.banners(), 1, "{}", o.notify);
-        assert!(o.notify.contains("cannot restrict"), "{}", o.notify);
-        assert_eq!(o.log, "old\n");
-    }
-
-    #[test]
-    fn hotkey_unwritable_log_is_reported_not_swallowed() {
-        if is_root() {
-            eprintln!("running as root: file modes do not block writes; skipping");
-            return;
-        }
-        let sb = Sandbox::new();
-        sb.add_tool("chmod", "#!/bin/sh\nexit 0\n"); // so the preflight cannot repair the mode
-        fs::write(sb.p("quill.log"), "old\n").unwrap();
-        fs::set_permissions(sb.p("quill.log"), fs::Permissions::from_mode(0o444)).unwrap();
-        let o = sb.run("ok", 0);
-        assert_ne!(o.code, 0);
-        assert_eq!(o.quill_calls, 1);
-        assert_eq!(o.banners(), 1, "{}", o.notify);
-        assert!(o.notify.contains("cannot write"), "{}", o.notify);
-        assert!(
-            o.notify.contains("Cmd+V"),
-            "the normal banner is still shown: {}",
-            o.notify
-        );
-        assert_eq!(fs::read_to_string(sb.p("quill.log")).unwrap(), "old\n");
-    }
-
-    #[test]
-    fn hotkey_leaves_no_temp_files_and_releases_after_a_permission_stop() {
-        let sb = Sandbox::new();
-        let o = sb.run(
-            "ERR -1743: Not authorized to send Apple events to System Events.",
-            0,
-        );
-        assert_ne!(o.code, 0);
-        assert_eq!(o.quill_calls, 0);
-        let o = sb.run("ok", 0);
-        assert_eq!(
-            o.quill_calls, 1,
-            "the lock must be free after a permission stop"
-        );
-        let leftovers: Vec<String> = fs::read_dir(&sb.root)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
-            .filter(|n| n.starts_with(".hotkey.") && n != ".hotkey.lock")
-            .collect();
-        assert!(
-            leftovers.is_empty(),
-            "temp files left behind: {leftovers:?}"
-        );
-    }
-
-    #[test]
-    fn hotkey_concurrent_triggers_run_quill_exactly_once() {
-        for round in 0..5 {
+        #[test]
+        fn hotkey_banner_text_is_data_not_code_and_is_bounded() {
             let sb = Sandbox::new();
-            let go = sb.p("go");
-            let o = Opts::new("ok", 0).sleep("0.5");
-            let kids: Vec<Child> = (0..8).map(|_| sb.spawn_barrier(&o, &go)).collect();
-            fs::write(&go, "").unwrap();
-            for mut k in kids {
-                assert!(k.wait().unwrap().success());
-            }
-            let out = sb.outcome(0);
-            assert_eq!(
-                out.quill_calls, 1,
-                "round {round}: quill ran {} times",
-                out.quill_calls
-            );
-            assert_eq!(out.banners(), 1, "round {round}: {}", out.notify);
-            assert_eq!(headers(&out.log), 1, "round {round}: {}", out.log);
+            let nasty =
+                "[quill] it said \"no\" and 'maybe' $(touch pwned) `touch pwned` ; rm -rf /";
+            let o = sb.run_opts(&Opts::new("ok", 1).err(nasty));
+            assert!(o.notify.contains("$(touch pwned)"), "{}", o.notify);
+            assert!(!Path::new("pwned").exists() && !sb.p("pwned").exists());
+            let long = format!("[quill] {}", "x".repeat(400));
+            let sb = Sandbox::new();
+            let o = sb.run_opts(&Opts::new("ok", 1).err(&long));
+            let lines: Vec<&str> = o.notify.lines().collect();
+            let msg = lines[lines.len() - 2];
+            assert!(msg.len() < 260, "banner not bounded: {} chars", msg.len());
+            assert!(msg.ends_with("quill.log"), "{msg}");
         }
-    }
 
-    #[test]
-    fn hotkey_lock_follows_the_running_quill_even_if_the_shell_is_killed() {
-        let sb = Sandbox::new();
-        let mut owner = sb.spawn(&Opts::new("ok", 0).block());
-        sb.wait_for("quill.started");
-        signal(owner.id(), "KILL"); // the shell dies; its foreground quill keeps running
-        let _ = owner.wait();
-        let o = sb.run("ok", 0);
-        assert_eq!(o.code, 0);
-        assert_eq!(
-            o.quill_calls, 1,
-            "contender must skip while the old quill lives"
-        );
-        assert_eq!(o.banners(), 0, "contender must be silent: {}", o.notify);
-        sb.release();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
+        #[test]
+        fn hotkey_log_is_appended_across_runs() {
+            let sb = Sandbox::new();
+            let _ = sb.run("ok", 0);
+            let o = sb.run_opts(&Opts::new("ok", 0).err("[quill] no changes"));
+            assert_eq!(headers(&o.log), 2, "{}", o.log);
+            assert!(o.log.contains("[quill] done") && o.log.contains("[quill] no changes"));
+        }
+
+        #[test]
+        fn hotkey_log_is_trimmed_and_stays_private() {
+            let sb = Sandbox::new();
+            let mut old = String::new();
+            for i in 0..3000 {
+                old.push_str(&format!("old line {i:05} padding padding padding\n"));
+            }
+            assert!(old.len() > 100_000);
+            fs::write(sb.p("quill.log"), &old).unwrap();
             let o = sb.run("ok", 0);
-            if o.quill_calls >= 2 {
-                break;
-            }
-            assert!(Instant::now() < deadline, "lock never became free");
-            std::thread::sleep(Duration::from_millis(100));
+            let n = o.log.lines().count();
+            assert!((300..=400).contains(&n), "{n} lines left");
+            assert!(
+                o.log.contains("[quill] done"),
+                "new block must survive the trim"
+            );
+            assert!(
+                !o.log.contains("old line 00000"),
+                "oldest lines must be gone"
+            );
+            assert_eq!(mode_of(&sb.p("quill.log")), 0o600);
         }
-    }
 
-    #[test]
-    fn hotkey_live_owner_is_never_taken_over_whatever_the_lock_file_age() {
-        let sb = Sandbox::new();
-        let mut owner = sb.spawn(&Opts::new("ok", 0).block());
-        sb.wait_for("quill.started");
-        let st = Command::new("touch")
-            .args(["-t", "200001010000"])
-            .arg(sb.p(".hotkey.lock"))
-            .status()
-            .unwrap();
-        assert!(st.success());
-        let o = sb.run("ok", 0);
-        assert_eq!(o.quill_calls, 1);
-        assert_eq!(o.banners(), 0, "{}", o.notify);
-        sb.release();
-        assert!(owner.wait().unwrap().success());
-    }
+        #[test]
+        fn hotkey_existing_log_is_made_private() {
+            let sb = Sandbox::new();
+            fs::write(sb.p("quill.log"), "old\n").unwrap();
+            fs::set_permissions(sb.p("quill.log"), fs::Permissions::from_mode(0o644)).unwrap();
+            let o = sb.run("ok", 0);
+            assert_eq!(mode_of(&sb.p("quill.log")), 0o600);
+            assert!(
+                o.log.starts_with("old\n") && headers(&o.log) == 1,
+                "{}",
+                o.log
+            );
+        }
 
-    #[test]
-    fn hotkey_notification_helpers_do_not_keep_the_lock() {
-        let sb = Sandbox::new();
-        let a = sb.run_opts(&Opts::new("ok", 0).notify_bg()); // banner starts `sleep 5 &`
-        assert_eq!(a.quill_calls, 1);
-        let b = sb.run_opts(&Opts::new("ok", 0).notify_bg());
-        assert_eq!(
-            b.quill_calls, 2,
-            "a lingering notifier must not hold the lock"
-        );
-    }
+        #[test]
+        fn hotkey_symlinked_or_non_regular_log_is_refused() {
+            let sb = Sandbox::new();
+            let victim = sb.p("victim.txt");
+            fs::write(&victim, "VICTIM").unwrap();
+            symlink(&victim, sb.p("quill.log")).unwrap();
+            let o = sb.run("ok", 0);
+            assert_ne!(o.code, 0);
+            assert_eq!(o.quill_calls, 0, "quill must not run");
+            assert_eq!(o.banners(), 1, "{}", o.notify);
+            assert!(o.notify.contains("log file"), "{}", o.notify);
+            assert_eq!(fs::read_to_string(&victim).unwrap(), "VICTIM");
 
-    #[test]
-    fn hotkey_sigterm_releases_after_the_child_ends_and_cleans_up() {
-        let sb = Sandbox::new();
-        let mut owner = sb.spawn(&Opts::new("ok", 0).block());
-        sb.wait_for("quill.started");
-        signal(owner.id(), "TERM");
-        sb.release();
-        let st = owner.wait().unwrap();
-        assert_eq!(st.code(), Some(143), "{st:?}");
-        let o = sb.run("ok", 0);
-        assert_eq!(o.quill_calls, 2, "lock must be free after the owner ended");
-        let leftovers: Vec<String> = fs::read_dir(&sb.root)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
-            .filter(|n| n.starts_with(".hotkey.") && n != ".hotkey.lock")
-            .collect();
-        assert!(leftovers.is_empty(), "{leftovers:?}");
-    }
+            let sb = Sandbox::new();
+            fs::create_dir(sb.p("quill.log")).unwrap();
+            let o = sb.run("ok", 0);
+            assert_ne!(o.code, 0);
+            assert_eq!(o.quill_calls, 0);
+            assert_eq!(o.banners(), 1, "{}", o.notify);
+            assert!(o.notify.contains("not a regular file"), "{}", o.notify);
+        }
 
-    #[test]
-    fn hotkey_unusable_lock_file_is_reported() {
-        let sb = Sandbox::new();
-        let victim = sb.p("victim.txt");
-        fs::write(&victim, "VICTIM").unwrap();
-        symlink(&victim, sb.p(".hotkey.lock")).unwrap();
-        let o = sb.run("ok", 0);
-        assert_ne!(o.code, 0);
-        assert_eq!(o.quill_calls, 0);
-        assert_eq!(o.banners(), 1, "{}", o.notify);
-        assert!(o.notify.contains("lock file"), "{}", o.notify);
-        assert_eq!(fs::read_to_string(&victim).unwrap(), "VICTIM");
+        #[test]
+        fn hotkey_failing_chmod_stops_before_copying() {
+            let sb = Sandbox::new();
+            sb.add_tool("chmod", "#!/bin/sh\nexit 1\n");
+            fs::write(sb.p("quill.log"), "old\n").unwrap();
+            let o = sb.run("ok", 0);
+            assert_ne!(o.code, 0);
+            assert_eq!(o.quill_calls, 0);
+            assert_eq!(o.banners(), 1, "{}", o.notify);
+            assert!(o.notify.contains("cannot restrict"), "{}", o.notify);
+            assert_eq!(o.log, "old\n");
+        }
 
-        let sb = Sandbox::new();
-        fs::create_dir(sb.p(".hotkey.lock")).unwrap();
-        let o = sb.run("ok", 0);
-        assert_ne!(o.code, 0);
-        assert_eq!(o.quill_calls, 0);
-        assert!(o.notify.contains("lock file"), "{}", o.notify);
-    }
+        #[test]
+        fn hotkey_unwritable_log_is_reported_not_swallowed() {
+            if is_root() {
+                eprintln!("running as root: file modes do not block writes; skipping");
+                return;
+            }
+            let sb = Sandbox::new();
+            sb.add_tool("chmod", "#!/bin/sh\nexit 0\n"); // so the preflight cannot repair the mode
+            fs::write(sb.p("quill.log"), "old\n").unwrap();
+            fs::set_permissions(sb.p("quill.log"), fs::Permissions::from_mode(0o444)).unwrap();
+            let o = sb.run("ok", 0);
+            assert_ne!(o.code, 0);
+            assert_eq!(o.quill_calls, 1);
+            assert_eq!(o.banners(), 1, "{}", o.notify);
+            assert!(o.notify.contains("cannot write"), "{}", o.notify);
+            assert!(
+                o.notify.contains("Cmd+V"),
+                "the normal banner is still shown: {}",
+                o.notify
+            );
+            assert_eq!(fs::read_to_string(sb.p("quill.log")).unwrap(), "old\n");
+        }
 
-    #[test]
-    fn hotkey_without_perl_degrades_to_running_unlocked_and_says_so() {
-        let sb = Sandbox::new();
-        let p = sb.path_without_perl();
-        let o = sb.run_opts(&Opts::new("ok", 0).path(p));
-        assert_eq!(o.code, 0);
-        assert_eq!(o.quill_calls, 1);
-        assert_eq!(o.banners(), 1, "{}", o.notify);
-        assert!(
-            o.log
-                .contains("[quill] warning: single-instance lock unavailable"),
-            "{}",
-            o.log
-        );
-    }
+        #[test]
+        fn hotkey_leaves_no_temp_files_and_releases_after_a_permission_stop() {
+            let sb = Sandbox::new();
+            let o = sb.run(
+                "ERR -1743: Not authorized to send Apple events to System Events.",
+                0,
+            );
+            assert_ne!(o.code, 0);
+            assert_eq!(o.quill_calls, 0);
+            let o = sb.run("ok", 0);
+            assert_eq!(
+                o.quill_calls, 1,
+                "the lock must be free after a permission stop"
+            );
+            let leftovers: Vec<String> = fs::read_dir(&sb.root)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+                .filter(|n| n.starts_with(".hotkey.") && n != ".hotkey.lock")
+                .collect();
+            assert!(
+                leftovers.is_empty(),
+                "temp files left behind: {leftovers:?}"
+            );
+        }
 
-    #[test]
-    fn hotkey_template_substitution_is_single_pass_and_complete() {
-        let s = render_hotkey_script("/bin/x", "/tmp/@MSG_AUTOMATION@/@BIN@/quill.log");
-        assert!(s.contains("'/tmp/@MSG_AUTOMATION@/@BIN@/quill.log'"), "{s}");
-        let s = render_hotkey_script("/bin/x", "/tmp/quill.log");
-        assert!(!s.contains('@'), "unreplaced placeholder in:\n{s}");
-        let ok = Command::new("/bin/sh")
-            .arg("-n")
-            .arg("-c")
-            .arg(&s)
-            .status()
-            .unwrap();
-        assert!(ok.success());
+        #[test]
+        fn hotkey_concurrent_triggers_run_quill_exactly_once() {
+            for round in 0..5 {
+                let sb = Sandbox::new();
+                let go = sb.p("go");
+                let o = Opts::new("ok", 0).sleep("0.5");
+                let kids: Vec<Child> = (0..8).map(|_| sb.spawn_barrier(&o, &go)).collect();
+                fs::write(&go, "").unwrap();
+                for mut k in kids {
+                    assert!(k.wait().unwrap().success());
+                }
+                let out = sb.outcome(0);
+                assert_eq!(
+                    out.quill_calls, 1,
+                    "round {round}: quill ran {} times",
+                    out.quill_calls
+                );
+                assert_eq!(out.banners(), 1, "round {round}: {}", out.notify);
+                assert_eq!(headers(&out.log), 1, "round {round}: {}", out.log);
+            }
+        }
+
+        #[test]
+        fn hotkey_lock_follows_the_running_quill_even_if_the_shell_is_killed() {
+            let sb = Sandbox::new();
+            let mut owner = sb.spawn(&Opts::new("ok", 0).block());
+            sb.wait_for("quill.started");
+            signal(owner.id(), "KILL"); // the shell dies; its foreground quill keeps running
+            let _ = owner.wait();
+            let o = sb.run("ok", 0);
+            assert_eq!(o.code, 0);
+            assert_eq!(
+                o.quill_calls, 1,
+                "contender must skip while the old quill lives"
+            );
+            assert_eq!(o.banners(), 0, "contender must be silent: {}", o.notify);
+            sb.release();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let o = sb.run("ok", 0);
+                if o.quill_calls >= 2 {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "lock never became free");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+
+        #[test]
+        fn hotkey_live_owner_is_never_taken_over_whatever_the_lock_file_age() {
+            let sb = Sandbox::new();
+            let mut owner = sb.spawn(&Opts::new("ok", 0).block());
+            sb.wait_for("quill.started");
+            let st = Command::new("touch")
+                .args(["-t", "200001010000"])
+                .arg(sb.p(".hotkey.lock"))
+                .status()
+                .unwrap();
+            assert!(st.success());
+            let o = sb.run("ok", 0);
+            assert_eq!(o.quill_calls, 1);
+            assert_eq!(o.banners(), 0, "{}", o.notify);
+            sb.release();
+            assert!(owner.wait().unwrap().success());
+        }
+
+        #[test]
+        fn hotkey_notification_helpers_do_not_keep_the_lock() {
+            let sb = Sandbox::new();
+            let a = sb.run_opts(&Opts::new("ok", 0).notify_bg()); // banner starts `sleep 5 &`
+            assert_eq!(a.quill_calls, 1);
+            let b = sb.run_opts(&Opts::new("ok", 0).notify_bg());
+            assert_eq!(
+                b.quill_calls, 2,
+                "a lingering notifier must not hold the lock"
+            );
+        }
+
+        #[test]
+        fn hotkey_sigterm_releases_after_the_child_ends_and_cleans_up() {
+            let sb = Sandbox::new();
+            let mut owner = sb.spawn(&Opts::new("ok", 0).block());
+            sb.wait_for("quill.started");
+            signal(owner.id(), "TERM");
+            sb.release();
+            let st = owner.wait().unwrap();
+            assert_eq!(st.code(), Some(143), "{st:?}");
+            let o = sb.run("ok", 0);
+            assert_eq!(o.quill_calls, 2, "lock must be free after the owner ended");
+            let leftovers: Vec<String> = fs::read_dir(&sb.root)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+                .filter(|n| n.starts_with(".hotkey.") && n != ".hotkey.lock")
+                .collect();
+            assert!(leftovers.is_empty(), "{leftovers:?}");
+        }
+
+        #[test]
+        fn hotkey_unusable_lock_file_is_reported() {
+            let sb = Sandbox::new();
+            let victim = sb.p("victim.txt");
+            fs::write(&victim, "VICTIM").unwrap();
+            symlink(&victim, sb.p(".hotkey.lock")).unwrap();
+            let o = sb.run("ok", 0);
+            assert_ne!(o.code, 0);
+            assert_eq!(o.quill_calls, 0);
+            assert_eq!(o.banners(), 1, "{}", o.notify);
+            assert!(o.notify.contains("lock file"), "{}", o.notify);
+            assert_eq!(fs::read_to_string(&victim).unwrap(), "VICTIM");
+
+            let sb = Sandbox::new();
+            fs::create_dir(sb.p(".hotkey.lock")).unwrap();
+            let o = sb.run("ok", 0);
+            assert_ne!(o.code, 0);
+            assert_eq!(o.quill_calls, 0);
+            assert!(o.notify.contains("lock file"), "{}", o.notify);
+        }
+
+        #[test]
+        fn hotkey_without_perl_degrades_to_running_unlocked_and_says_so() {
+            let sb = Sandbox::new();
+            let p = sb.path_without_perl();
+            let o = sb.run_opts(&Opts::new("ok", 0).path(p));
+            assert_eq!(o.code, 0);
+            assert_eq!(o.quill_calls, 1);
+            assert_eq!(o.banners(), 1, "{}", o.notify);
+            assert!(
+                o.log
+                    .contains("[quill] warning: single-instance lock unavailable"),
+                "{}",
+                o.log
+            );
+        }
+
+        #[test]
+        fn hotkey_template_substitution_is_single_pass_and_complete() {
+            let s = render_hotkey_script("/bin/x", "/tmp/@MSG_AUTOMATION@/@BIN@/quill.log");
+            assert!(s.contains("'/tmp/@MSG_AUTOMATION@/@BIN@/quill.log'"), "{s}");
+            let s = render_hotkey_script("/bin/x", "/tmp/quill.log");
+            assert!(!s.contains('@'), "unreplaced placeholder in:\n{s}");
+            let ok = Command::new("/bin/sh")
+                .arg("-n")
+                .arg("-c")
+                .arg(&s)
+                .status()
+                .unwrap();
+            assert!(ok.success());
+        }
+
+        #[test]
+        fn hotkey_copy_step_keeps_the_lock_when_the_shell_is_killed() {
+            let sb = Sandbox::new();
+            let mut owner = sb.spawn(&Opts::new("ok", 0).osa_block());
+            sb.wait_for("osa.started");
+            signal(owner.id(), "KILL"); // shell dies; its Edit>Copy osascript keeps running
+            let _ = owner.wait();
+            let o = sb.run("ok", 0);
+            assert_eq!(
+                o.quill_calls, 0,
+                "contender must skip while the copy step lives"
+            );
+            assert_eq!(o.banners(), 0, "{}", o.notify);
+            sb.release();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let o = sb.run("ok", 0);
+                if o.quill_calls >= 1 {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "lock never became free");
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+
+        #[test]
+        fn hotkey_sweeps_stale_temp_files_but_keeps_fresh_ones() {
+            let sb = Sandbox::new();
+            let stale = sb.p(".hotkey.AbCdEf");
+            let fresh = sb.p(".hotkey.ZzYyXx");
+            let other = sb.p("notes.txt");
+            for f in [&stale, &fresh, &other] {
+                fs::write(f, "x").unwrap();
+            }
+            for f in [&stale, &other] {
+                let st = Command::new("touch")
+                    .args(["-t", "200001010000"])
+                    .arg(f)
+                    .status()
+                    .unwrap();
+                assert!(st.success());
+            }
+            let o = sb.run("ok", 0);
+            assert_eq!(o.quill_calls, 1);
+            assert!(!stale.exists(), "stale temp file must be swept");
+            assert!(fresh.exists(), "a fresh temp file may belong to a live run");
+            assert!(other.exists(), "unrelated files are never touched");
+            assert!(
+                sb.p(".hotkey.lock").exists(),
+                "the lock file itself is never swept"
+            );
+        }
+
+        #[test]
+        fn hotkey_log_trim_also_caps_bytes() {
+            let sb = Sandbox::new();
+            let mut old = String::from("short line\n");
+            old.push_str(&"y".repeat(300_000));
+            old.push('\n');
+            fs::write(sb.p("quill.log"), &old).unwrap();
+            let o = sb.run("ok", 0);
+            assert!(o.log.len() <= 100_000, "log is {} bytes", o.log.len());
+            assert!(o.log.contains("[quill] done"), "newest block must survive");
+            assert_eq!(mode_of(&sb.p("quill.log")), 0o600);
+        }
+
+        #[test]
+        fn hotkey_lock_error_other_than_busy_is_not_treated_as_busy() {
+            // the script must only treat EWOULDBLOCK as "somebody else is running"
+            let s = render_hotkey_script("/bin/x", "/tmp/quill.log");
+            assert!(s.contains("$!{EWOULDBLOCK} ? 1 : 2"), "{s}");
+        }
     }
 }

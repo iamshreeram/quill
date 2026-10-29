@@ -472,7 +472,7 @@ Failures are logged to `~/.config/quill/quill.log`.
 
 The shortcut runs `hotkey.sh`, which behaves as follows:
 
-- **One run at a time.** Holding or repeating the shortcut starts a single run. Extra presses while a run is active are ignored silently. The script takes a kernel file lock on `~/.config/quill/.hotkey.lock`. This is an empty file that is safe to leave in place. The lock is released automatically when the run ends, including its `quill` process, even if the script is killed. No manual cleanup is needed. The lock needs `perl`, which ships with macOS at `/usr/bin/perl`. Without `perl` the script still works, but it runs without the lock and writes `[quill] warning: single-instance lock unavailable` to the log.
+- **One run at a time.** Holding or repeating the shortcut starts a single run as long as that run is still active; extra presses while it is active are ignored silently. (If a very fast offline run finishes while the key is still held, a further key repeat can start another run.) The script takes a kernel file lock on `~/.config/quill/.hotkey.lock`. This is an empty file that is safe to leave in place. The lock is released automatically when the run ends, including its `quill` process, even if the script is killed. No manual cleanup is needed. The lock needs `perl`, which ships with macOS at `/usr/bin/perl`. Without `perl` the script still works, but it runs without the lock and writes `[quill] warning: single-instance lock unavailable` to the log.
 - **Banners.** The script shows one of these messages:
   - Success: `Quill: result is on the clipboard - paste with Cmd+V.`
   - AI failed, offline fixes used: `Quill: AI failed (<reason>); used offline grammar fixes. Result is on the clipboard - paste with Cmd+V.`
@@ -480,6 +480,7 @@ The shortcut runs `hotkey.sh`, which behaves as follows:
   - Offline mode applied fixes: `Quill: offline grammar fixes applied. Result is on the clipboard - paste with Cmd+V.`
   - No changes: `Quill: no changes found; clipboard left as is.`
   - Failure: `Quill failed: <last error line>. See ~/.config/quill/quill.log`
+  - Anything else (quill exited normally but printed no status line it recognises): `Quill: finished. See ~/.config/quill/quill.log`
   - Permission problems show the messages described in [Permissions (macOS)](#permissions-macos).
 - **Log.** `~/.config/quill/quill.log` is appended to. Each run is a block that starts with a `YYYY-MM-DD HH:MM:SS run pid=<pid> rc=<code>` header, followed by `quill`'s messages. The file is kept private (`0600`). When it exceeds about 100 KB, it is trimmed to the last 400 lines. The script refuses to write if the log or the lock file is a symlink or not a regular file. It then shows a banner asking you to remove that file.
 - **Clipboard reads and writes.** `quill --now` retries an empty clipboard read up to 4 times over about 150 ms. It retries the clipboard write up to 3 times. Another copy can leave the clipboard briefly empty, so these retries avoid spurious failures.
