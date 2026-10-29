@@ -962,4 +962,119 @@ mod tests {
         assert!(Dialect::from_str("nope").is_err());
         assert_eq!(Dialect::default(), Dialect::American);
     }
+
+    // ---- loosened allow-list / frequency rerank / irregular table (lead-written spec, DESIGN Rev 4) ----
+
+    fn check_cases(cases: &[(&str, &str)]) {
+        let mut bad = Vec::new();
+        for (input, want) in cases {
+            let got = fix(input);
+            if got != *want {
+                bad.push(format!("{input:?} -> {got:?} (want {want:?})"));
+            }
+        }
+        assert!(bad.is_empty(), "\n{}", bad.join("\n"));
+    }
+
+    #[test]
+    fn loosened_harper_rules_fix_common_confusions() {
+        check_cases(&[
+            ("This phone is cheaper then that one.", "This phone is cheaper than that one."),
+            ("We could of won the game.", "We could have won the game."),
+            ("Its a great idea.", "It's a great idea."),
+            ("The company changed it's name.", "The company changed its name."),
+            ("Your welcome to stay for dinner.", "You're welcome to stay for dinner."),
+            ("Put the boxes over their.", "Put the boxes over there."),
+            ("Their going to the park.", "They're going to the park."),
+            ("The affect of caffeine is real.", "The effect of caffeine is real."),
+            ("I don't want to loose my keys.", "I don't want to lose my keys."),
+            ("We are going too the cinema.", "We are going to the cinema."),
+            ("She has went to the market.", "She has gone to the market."),
+            ("He cant come today.", "He can't come today."),
+        ]);
+    }
+
+    #[test]
+    fn frequency_ranked_spelling_picks_the_common_word() {
+        check_cases(&[
+            ("We have an apointment tomorrow.", "We have an appointment tomorrow."),
+            ("I will arive soon.", "I will arrive soon."),
+            ("Tell me wich one you want.", "Tell me which one you want."),
+            ("What is your adress?", "What is your address?"),
+        ]);
+    }
+
+    #[test]
+    fn irregular_table_is_context_aware() {
+        check_cases(&[
+            ("She buyed a car.", "She bought a car."),
+            ("He teached me chess.", "He taught me chess."),
+            ("They goed home.", "They went home."),
+            ("I eated lunch.", "I ate lunch."),
+            ("I have eated lunch.", "I have eaten lunch."),
+            ("She has teached us.", "She has taught us."),
+            ("I've eated lunch.", "I've eaten lunch."),
+            ("She's buyed a car.", "She's bought a car."),
+            ("We writed a report.", "We wrote a report."),
+            ("They had writed it already.", "They had written it already."),
+        ]);
+    }
+
+    #[test]
+    fn ambiguous_contracted_auxiliary_never_defaults_to_past() {
+        // unchanged is acceptable; a wrong past form is not
+        assert_ne!(fix("She's eated lunch."), "She's ate lunch.");
+        assert_ne!(fix("I'd eated lunch."), "I'd ate lunch.");
+    }
+
+    #[test]
+    fn loosened_rules_leave_correct_text_alone() {
+        let clean = [
+            "The drug will affect your sleep.",
+            "Their dog is near the lake.",
+            "The cat licked its paw.",
+            "It's been a busy month.",
+            "You're welcome to stay.",
+            "I will lose my keys.",
+            "We went to the market too.",
+            "The knight rode a horse.",
+            "Run `sudo apt install nginx` now.",
+            "Use docker and kubectl for this.",
+            "She sang a song.",
+            "He taught math.",
+            "We should have gone earlier.",
+            "Your welcome email was lovely.",
+            "Some advise caution.",
+            "May the good advise the king.",
+            "I have an appointment today.",
+            "Check https://example.com/its-a-trap for details.",
+            "The fire singed his hair.",
+            "Tom ran home after the game.",
+        ];
+        let cases: Vec<(&str, &str)> = clean.iter().map(|c| (*c, *c)).collect();
+        check_cases(&cases);
+    }
+
+    #[test]
+    fn custom_lint_wins_over_overlapping_harper_lint() {
+        let mk = |s: usize, e: usize, kind: LintKind, rep: &str| Lint {
+            span: Span::new(s, e),
+            lint_kind: kind,
+            suggestions: vec![Suggestion::ReplaceWith(rep.chars().collect())],
+            message: String::new(),
+            priority: 0,
+        };
+        let harper = vec![
+            mk(2, 9, LintKind::Spelling, "teacher"),   // overlaps the custom lint -> dropped
+            mk(20, 24, LintKind::Grammar, "XXXX"),     // disjoint -> survives
+        ];
+        let custom = vec![mk(2, 9, LintKind::Grammar, "taught")];
+        let merged = merge_custom_over_harper(harper, custom);
+        assert_eq!(merged.len(), 2, "{merged:?}");
+        assert!(merged.iter().any(|l| l.span == Span::new(2, 9)
+            && l.suggestions == vec![Suggestion::ReplaceWith("taught".chars().collect())]));
+        assert!(merged.iter().any(|l| l.span == Span::new(20, 24)));
+        assert!(!merged.iter().any(|l| l.suggestions
+            == vec![Suggestion::ReplaceWith("teacher".chars().collect())]));
+    }
 }
