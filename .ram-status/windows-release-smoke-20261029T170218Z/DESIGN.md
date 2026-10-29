@@ -60,7 +60,7 @@ make install.ps1 able to install it, and stop CI from hiding Windows smoke failu
 - A2 `bash tests/release_scripts_test.sh` includes r09 and r10 and passes; `bash tests/install_test.sh`, `bash tests/auto_release_test.sh`, `sh -n install.sh` still pass.
 - A3 YAML parses (yq); ci/release workflows otherwise unchanged (git diff).
 - A4 After merge the next real release must show `build x86_64-pc-windows-msvc: success` and a windows zip + SHA256SUMS entry in the release assets
-  (a release only happens on a releasable commit to main; this PR itself will be a `fix:` => release v0.8.1 is triggered by the merge).
+  (a release only happens on a releasable commit to main; this PR itself will be a `fix:` => release v0.9.0 (next-version.sh bumps the minor) is triggered by the merge).
 
 ## Corner cases
 - PowerShell `$proc.ExitCode` null without cached handle; WaitForExit(ms) vs -Wait; empty stdout file; BOM-less stdin; Start-Process with -ArgumentList array.

@@ -1,4 +1,4 @@
-PHASE: integrating (PR CI on windows-latest is the acceptance gate)
+PHASE: done (validator PASS; PR CI green on windows-latest; merge + first real release pending with the owner)
 Task: fix Windows release smoke failure + install.ps1 latest-tag/version capture + CI hiding it; branch fix/windows-release-smoke; design .ram-status/windows-release-smoke-20261029T170218Z/DESIGN.md Revision 3
 1. design + critic review (3 rounds, round 3 re-run once: first call saw a stale file) -- lead -- done @2026-10-29T17:14:23Z
 2. tests first: tests/release_scripts_test.sh r09 + r10 -- lead -- done @2026-10-29T17:14:23Z
@@ -14,3 +14,6 @@ OUTCOME: step=3 agent=ram-implementer model=claude-haiku-5-5 first_pass=yes corr
 OUTCOME: step=4 agent=ram-implementer model=claude-haiku-5-5 first_pass=no corrections=1 result=done ts=2026-10-29T17:21:22Z
 OUTCOME: step=5 agent=ram-implementer model=claude-haiku-5-5 first_pass=yes corrections=0 result=done ts=2026-10-29T17:21:22Z
 NOTE: step 4 one lead-side fix after review ($StdinText [string] coercion); Windows execution unverified until CI
+REVIEW: round=1 by=validator verdict=PASS blockers=0 majors=0 ts=2026-10-29T17:40:23Z
+OUTCOME: step=6 agent=lead model=n/a first_pass=no corrections=2 result=done ts=2026-10-29T17:40:23Z
+NOTE: 2 CI-driven fixes (PSModulePath harness artifact; StdinText coercion) + validator minors: r09 regex widened with fixtures, next release is v0.9.0 not v0.8.1. Open minors (not blocking): fixture sends only relative Location; port-pick race; publish path with a Windows artifact proven only by the next real release.

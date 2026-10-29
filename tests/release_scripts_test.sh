@@ -153,10 +153,16 @@ r09_windows_gui_binary_is_never_captured() {
   grep -q 'RedirectStandardOutput' "$root/scripts/lib-native.ps1" 2>/dev/null || fail "lib-native.ps1 must redirect stdout to a file"
   grep -q 'lib-native.ps1' "$root/scripts/smoke-windows.ps1" 2>/dev/null || fail "smoke-windows.ps1 must dot-source lib-native.ps1"
   # no capture of a native program's output in any PowerShell script or workflow
+  local capture_re='=[[:space:]]*[$@]?\(?[[:space:]]*&'
+  # the guard itself must recognise every capture form (and not the legitimate `& $script` call statement)
+  for f in '$x = & $exe --version' '$x=&$exe --version' '$x = (& $exe --version)' '$x = $(& $exe --version)' '$x = @(& $exe --version)'; do
+    printf '%s\n' "$f" | grep -q -E "$capture_re" || fail "guard regex misses the capture form: $f"
+  done
+  printf '%s\n' '& $smoke -Bin $exe -Version $v' | grep -q -E "$capture_re" && fail "guard regex flags a plain & call statement"
   for f in scripts/lib-native.ps1 scripts/smoke-windows.ps1 scripts/check-windows-install.ps1 install.ps1 \
     .github/workflows/ci.yml .github/workflows/release.yml; do
     [ -f "$root/$f" ] || continue
-    if grep -n -E '=[[:space:]]*\(?[[:space:]]*&[[:space:]]' "$root/$f" > "$OUT" 2>&1; then fail "$f captures native output with '= &' (use Invoke-Native)"; fi
+    if grep -n -E "$capture_re" "$root/$f" > "$OUT" 2>&1; then fail "$f captures native output with '= &' (use Invoke-Native)"; fi
   done
   : > "$OUT"
   # install.ps1: latest tag is resolved with a non-following HttpClient, not the Invoke-WebRequest exception shape
