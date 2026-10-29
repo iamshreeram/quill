@@ -450,7 +450,7 @@ Both files are local and private (see Privacy and security).
 
 `quill setup` does the following:
 
-- Writes `~/.config/quill/hotkey.sh`. It copies the selection (System Events, Edit > Copy), waits briefly, then runs `quill --now` with stderr going to `~/.config/quill/quill.log`. If that run fails, it shows a notification that points to the log.
+- Writes `~/.config/quill/hotkey.sh`. It copies the selection (System Events, Edit > Copy), waits briefly, then runs `quill --now`. Its messages are appended to `~/.config/quill/quill.log`, and a banner shows the outcome (see [Hotkey script (macOS)](#hotkey-script-macos)).
 - Adds a managed block to `~/.skhdrc`, between these markers:
 
   ```text
@@ -467,6 +467,25 @@ To change the shortcut, edit `[shortcut] macos` in the config and run `quill set
 skhd must be installed and on your `PATH`. If it is not, `quill setup` prints install instructions and still writes its files. skhd needs Accessibility permission (System Settings > Privacy & Security > Accessibility) to receive the shortcut and to click Edit > Copy; see [Permissions (macOS)](#permissions-macos) for the full list.
 
 Failures are logged to `~/.config/quill/quill.log`.
+
+### Hotkey script (macOS)
+
+The shortcut runs `hotkey.sh`, which behaves as follows:
+
+- **One run at a time.** Holding or repeating the shortcut starts a single run as long as that run is still active; extra presses while it is active are ignored silently. (If a very fast offline run finishes while the key is still held, a further key repeat can start another run.) The script takes a kernel file lock on `~/.config/quill/.hotkey.lock`. This is an empty file that is safe to leave in place. The lock is released automatically when the run ends, including its `quill` process, even if the script is killed. No manual cleanup is needed. The lock needs `perl`, which ships with macOS at `/usr/bin/perl`. Without `perl` the script still works, but it runs without the lock and writes `[quill] warning: single-instance lock unavailable` to the log.
+- **Banners.** The script shows one of these messages:
+  - Success: `Quill: result is on the clipboard - paste with Cmd+V.`
+  - AI failed, offline fixes used: `Quill: AI failed (<reason>); used offline grammar fixes. Result is on the clipboard - paste with Cmd+V.`
+  - AI failed, offline found nothing: `Quill: AI failed (<reason>). Offline grammar found nothing to fix; clipboard left as is.`
+  - Offline mode applied fixes: `Quill: offline grammar fixes applied. Result is on the clipboard - paste with Cmd+V.`
+  - No changes: `Quill: no changes found; clipboard left as is.`
+  - Failure: `Quill failed: <last error line>. See ~/.config/quill/quill.log`
+  - Anything else (quill exited normally but printed no status line it recognises): `Quill: finished. See ~/.config/quill/quill.log`
+  - Permission problems show the messages described in [Permissions (macOS)](#permissions-macos).
+- **Log.** `~/.config/quill/quill.log` is appended to. Each run is a block that starts with a `YYYY-MM-DD HH:MM:SS run pid=<pid> rc=<code>` header, followed by `quill`'s messages. The file is kept private (`0600`). When it exceeds about 100 KB, it is trimmed to the last 400 lines. The script refuses to write if the log or the lock file is a symlink or not a regular file. It then shows a banner asking you to remove that file.
+- **Clipboard reads and writes.** `quill --now` retries an empty clipboard read up to 4 times over about 150 ms. It retries the clipboard write up to 3 times. Another copy can leave the clipboard briefly empty, so these retries avoid spurious failures.
+- **Known limit.** The script waits only 0.1 s after Edit > Copy. A slow app can still leave the old clipboard text for `quill` to read. If the result looks like the wrong text, copy the text yourself (Cmd+C), wait a moment, and press the shortcut again.
+- **Refreshing.** After upgrading Quill, re-run `quill setup` (the installer does this) to get the new `hotkey.sh`.
 
 ### Permissions (macOS)
 
@@ -502,7 +521,7 @@ After upgrading Quill, re-run `quill setup` to refresh `hotkey.sh`. The installe
 - **HTTP 401 (`API error: HTTP 401`)**: the key is wrong or is sent in the wrong way. Check `key` and `auth`. Run `quill check`.
 - **Timeout**: the endpoint is slow or unreachable. Raise `timeout_secs` (maximum 600) or check the URL. For Ollama, the timeout is at least 120 seconds; a cold model load can still be slow.
 - **Offline grammar mode although you expected AI**: run `quill status`. It shows the mode source, whether an API key was found, and the Ollama probe result (not reachable, no usable model, or the model is not pulled).
-- **Hotkey does nothing (macOS)**: check the permissions in [Permissions (macOS)](#permissions-macos), especially Automation for System Events. Confirm skhd is running (`skhd --start-service`). Then check `~/.config/quill/quill.log`.
+- **Hotkey does nothing (macOS)**: check the permissions in [Permissions (macOS)](#permissions-macos), especially Automation for System Events. Confirm skhd is running (`skhd --start-service`). Then check `~/.config/quill/quill.log`. It keeps a history of runs, so the latest block is at the end. A banner appears for failures and for AI fallbacks to offline mode; see [Hotkey script (macOS)](#hotkey-script-macos).
 - **Config errors**: run `quill check`. It names the offending field (for example `api.url`, `auth`, `timeout_secs`, `general.mode` or `offline.dialect`) without printing secret values.
 - **Installer stops with "glibc >= 2.35 is required" or "libssl.so.3 not found"**: install a newer distribution runtime or OpenSSL 3, or build from source (see [Build from source](#build-from-source)).
 - **Installer stops with "checksum mismatch"**: nothing was installed and any existing binary is untouched. Download again; if it persists, do not force the install.

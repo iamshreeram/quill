@@ -135,7 +135,7 @@ fn transform_clipboard(cli_mode: Option<Mode>, profile: Option<&str>) -> i32 {
         return 1;
     }
 
-    let text = match clipboard::get_text() {
+    let text = match clipboard::get_text_retrying() {
         Some(t) if !t.trim().is_empty() => t.trim().to_string(),
         _ => {
             eprintln!("[quill] clipboard is empty or has no text");
@@ -155,7 +155,7 @@ fn transform_clipboard(cli_mode: Option<Mode>, profile: Option<&str>) -> i32 {
                     eprintln!("[quill] no changes");
                     return 0;
                 }
-                if clipboard::set_text(clean) {
+                if clipboard::set_text_retrying(clean) {
                     eprintln!("[quill] done (offline grammar mode)");
                     0
                 } else {
@@ -165,7 +165,7 @@ fn transform_clipboard(cli_mode: Option<Mode>, profile: Option<&str>) -> i32 {
             } else {
                 // Record before/after for learning
                 history::append(&text, clean);
-                if clipboard::set_text(clean) {
+                if clipboard::set_text_retrying(clean) {
                     eprintln!("[quill] done");
                     0
                 } else {
